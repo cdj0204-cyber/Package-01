@@ -34,6 +34,69 @@ export interface ImportedMesh {
   color?: [number, number, number];
 }
 
+/** Rigid placement of a model in the scene (rotation in radians). */
+export interface ModelTransform {
+  position: [number, number, number];
+  rotation: [number, number, number];
+}
+
+// ── Step 2 — per-model silhouette → offset → extruded solid ────────────────────
+
+/**
+ * A signed-distance field of a model's projected silhouette in a chosen view's
+ * 2D (u,v) plane (world-space mm). Negative inside, positive outside. Offsetting
+ * the silhouette is just reading the iso-contour at a different level, so + / −
+ * offsets are exact and handle concave shapes and holes.
+ */
+export interface SilhouetteField {
+  view: ViewName;
+  /** Grid resolution. */
+  nu: number;
+  nv: number;
+  /** World (u,v) coordinate of grid cell (0,0)'s centre, in mm. */
+  origin: [number, number];
+  /** Cell size in mm. */
+  cell: number;
+  /** Signed distance per cell (row-major, length nu*nv), mm. Negative = inside. */
+  sdf: Float32Array;
+  /** Silhouette bounding box in the (u,v) plane (mm). */
+  uvMin: [number, number];
+  uvMax: [number, number];
+  /** World axis index used as the extrude/depth direction (0=X,1=Y,2=Z). */
+  depthAxis: 0 | 1 | 2;
+  /** World coordinate (mm) of the silhouette's base face along the depth axis. */
+  depthBase: number;
+  /** Model extent along the depth axis (mm) — the default extrude depth. */
+  depthSize: number;
+  /** Outward grid margin (mm) — the maximum usable positive offset. */
+  pad: number;
+}
+
+/** A model's extracted silhouette plus its offset and extrude settings. */
+export interface ModelSilhouette {
+  modelId: string;
+  view: ViewName;
+  field: SilhouetteField;
+  /** Signed offset distance applied to the outline (mm). */
+  offset: number;
+  /** Extrude depth of the offset plane along the depth axis (mm). */
+  extrudeDepth: number;
+  /**
+   * Draft (구배) angle in degrees. 0 = straight walls. Positive insets the top
+   * face (walls lean inward going up); negative flares it out. Applied as a
+   * gradual offset change along the extrude so the wall follows the silhouette.
+   */
+  draftDeg: number;
+}
+
+/** An imported product placed in the scene, independently selectable/movable. */
+export interface PlacedModel {
+  id: string;
+  name: string;
+  model: ImportedModel;
+  transform: ModelTransform;
+}
+
 /** Step 3 — per-view draft (구배) angle configuration, in degrees. */
 export interface DraftConfig {
   /** Which view the draft is pulled along. */
@@ -130,7 +193,14 @@ export interface TextElement {
 
 /** The full project state that flows through the pipeline. */
 export interface ProjectState {
-  model: ImportedModel | null;
+  /** All imported products in the scene (a package can hold several items). */
+  models: PlacedModel[];
+  /** Currently selected model for transform editing, or null. */
+  selectedModelId: string | null;
+  /** Step 2 — the view silhouettes are extracted from. */
+  silhouetteView: ViewName;
+  /** Step 2 — per-model extracted silhouettes (keyed by model id). */
+  modelSilhouettes: Record<string, ModelSilhouette>;
   silhouettes: Partial<Record<ViewName, Silhouette>>;
   drafts: Partial<Record<ViewName, DraftConfig>>;
   boxForm: BoxForm;

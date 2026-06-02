@@ -17,18 +17,70 @@ function getOcct(): Promise<any> {
     // Loaded lazily: occt-import-js references node built-ins at module scope,
     // so importing it eagerly would break the browser app. Dynamic import keeps
     // that cost (and any shim issues) confined to the moment a STEP is opened.
-    occtPromise = import("occt-import-js").then((mod) => mod.default());
+    occtPromise = (async () => {
+      // occt-import-js is a UMD bundle: `module.exports = factory`. Depending on
+      // interop, the factory may be on `.default` or be the module object itself.
+      const mod: any = await import("occt-import-js");
+      const factory =
+        typeof mod === "function"
+          ? mod
+          : typeof mod.default === "function"
+          ? mod.default
+          : mod.default?.default;
+      if (typeof factory !== "function") {
+        throw new Error("occt-import-js 로더를 찾지 못했습니다.");
+      }
+      // The emscripten module locates its .wasm via document.currentScript,
+      // which is wrong after bundling. Point it at the asset URL Vite emits.
+      const wasmUrl = (await import("occt-import-js/dist/occt-import-js.wasm?url"))
+        .default;
+      return factory({
+        locateFile: (path: string) =>
+          path.endsWith(".wasm") ? wasmUrl : path,
+      });
+    })();
   }
   return occtPromise;
 }
 
+/**
+ * Tessellation quality for display. We keep the original NURBS surface curvature
+ * smooth by triangulating finely (curvature-adaptive), so the model *looks* like
+ * the true B-rep surface even though WebGL ultimately rasterizes triangles —
+ * the same thing a Rhino viewport does. The B-rep itself is not retained here;
+ * precise NURBS booleans/draft (step 4) will introduce opencascade.js where needed.
+ *
+ * - `bounding_box_ratio`: chord error as a fraction of the model's bbox, so the
+ *   tessellation scales with the part regardless of its absolute size in mm.
+ * - `angularDeflection` (radians): caps the angle between adjacent facets, which
+ *   is what actually makes curved surfaces read as smooth.
+ */
+export interface TessellationQuality {
+  linearDeflectionType: "bounding_box_ratio" | "absolute_value";
+  linearDeflection: number;
+  angularDeflection: number;
+}
+
+/** Smooth default: fine chord error + ~11.5° facet cap. */
+export const SMOOTH_TESSELLATION: TessellationQuality = {
+  linearDeflectionType: "bounding_box_ratio",
+  linearDeflection: 0.001,
+  angularDeflection: 0.2,
+};
+
 export async function importStepFile(
-  file: File
+  file: File,
+  quality: TessellationQuality = SMOOTH_TESSELLATION
 ): Promise<ImportedModel> {
   const occt = await getOcct();
   const buffer = new Uint8Array(await file.arrayBuffer());
 
-  const result = occt.ReadStepFile(buffer, null);
+  const result = occt.ReadStepFile(buffer, {
+    linearUnit: "millimeter",
+    linearDeflectionType: quality.linearDeflectionType,
+    linearDeflection: quality.linearDeflection,
+    angularDeflection: quality.angularDeflection,
+  });
   if (!result || !result.success) {
     throw new Error("STEP 파일을 읽지 못했습니다.");
   }

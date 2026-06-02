@@ -6,11 +6,18 @@ import type {
   DraftConfig,
   ImportedModel,
   InsertFoam,
+  ModelSilhouette,
+  ModelTransform,
+  PlacedModel,
   ProjectState,
   Silhouette,
   TextElement,
   ViewName,
 } from "../types";
+import {
+  buildSilhouetteField,
+  toLegacySilhouette,
+} from "../geometry/silhouetteField";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Central app store. Holds the full pipeline project state plus UI state
@@ -42,7 +49,10 @@ const initialArtwork: ArtworkConfig = {
 };
 
 const initialProject: ProjectState = {
-  model: null,
+  models: [],
+  selectedModelId: null,
+  silhouetteView: "top",
+  modelSilhouettes: {},
   silhouettes: {},
   drafts: {},
   boxForm: initialBoxForm,
@@ -53,13 +63,65 @@ const initialProject: ProjectState = {
   textElements: [],
 };
 
+export type { ModelTransform } from "../types";
+
+/** Camera viewpoints offered in the viewport. */
+export type CameraView =
+  | "perspective"
+  | "top"
+  | "bottom"
+  | "front"
+  | "rear"
+  | "right"
+  | "left";
+
+export const IDENTITY_TRANSFORM: ModelTransform = {
+  position: [0, 0, 0],
+  rotation: [0, 0, 0],
+};
+
+let modelCounter = 0;
+function nextModelId(): string {
+  modelCounter += 1;
+  return `model-${modelCounter}`;
+}
+
 export interface AppStore extends ProjectState {
   // ── UI state ──────────────────────────────────────────────────────────────
   currentStep: number; // 1..12
   setStep: (step: number) => void;
 
+  // ── Viewport display state ──────────────────────────────────────────────────
+  /** Lighting contrast 0..1: 0 = flat/even, 1 = strong directional shading. */
+  lightContrast: number;
+  setLightContrast: (v: number) => void;
+  /** Transform gizmo mode for the selected model. */
+  gizmoMode: "translate" | "rotate";
+  setGizmoMode: (m: "translate" | "rotate") => void;
+  /** Camera viewpoint: free perspective or one of the 6 orthographic faces. */
+  cameraView: CameraView;
+  setCameraView: (v: CameraView) => void;
+
+  // ── Multi-model management ───────────────────────────────────────────────────
+  /** Import one or more products; the last one becomes selected. */
+  addModels: (items: Array<{ model: ImportedModel; name: string }>) => void;
+  removeModel: (id: string) => void;
+  selectModel: (id: string | null) => void;
+  /** Update a specific model's placement (gizmo / numeric input). */
+  setModelTransform: (id: string, t: ModelTransform) => void;
+  /** Reset the selected model's placement to identity. */
+  resetSelectedTransform: () => void;
+
+  // ── Step 2 — per-model silhouette / offset / extrude ─────────────────────────
+  setSilhouetteView: (view: ViewName) => void;
+  /** Extract (or re-extract) the silhouette of a model in the current view. */
+  extractModelSilhouette: (modelId: string) => void;
+  setSilhouetteOffset: (modelId: string, offset: number) => void;
+  setSilhouetteExtrude: (modelId: string, extrudeDepth: number) => void;
+  setSilhouetteDraft: (modelId: string, draftDeg: number) => void;
+  clearModelSilhouette: (modelId: string) => void;
+
   // ── Step mutations ─────────────────────────────────────────────────────────
-  setModel: (model: ImportedModel | null) => void;
   setSilhouette: (view: ViewName, sil: Silhouette) => void;
   setDraft: (view: ViewName, draft: DraftConfig) => void;
   updateBoxForm: (patch: Partial<BoxForm>) => void;
@@ -80,7 +142,141 @@ export const useStore = create<AppStore>((set) => ({
 
   setStep: (step) => set({ currentStep: step }),
 
-  setModel: (model) => set({ model }),
+  lightContrast: 0.5,
+  setLightContrast: (lightContrast) => set({ lightContrast }),
+  gizmoMode: "rotate",
+  setGizmoMode: (gizmoMode) => set({ gizmoMode }),
+  cameraView: "perspective",
+  setCameraView: (cameraView) => set({ cameraView }),
+
+  addModels: (items) =>
+    set((s) => {
+      const placed: PlacedModel[] = items.map(({ model, name }) => ({
+        id: nextModelId(),
+        name,
+        model,
+        transform: {
+          position: [...IDENTITY_TRANSFORM.position] as [number, number, number],
+          rotation: [...IDENTITY_TRANSFORM.rotation] as [number, number, number],
+        },
+      }));
+      const models = [...s.models, ...placed];
+      return {
+        models,
+        selectedModelId: placed.length
+          ? placed[placed.length - 1].id
+          : s.selectedModelId,
+      };
+    }),
+
+  removeModel: (id) =>
+    set((s) => {
+      const models = s.models.filter((m) => m.id !== id);
+      const selectedModelId =
+        s.selectedModelId === id
+          ? models.length
+            ? models[models.length - 1].id
+            : null
+          : s.selectedModelId;
+      const modelSilhouettes = { ...s.modelSilhouettes };
+      delete modelSilhouettes[id];
+      return { models, selectedModelId, modelSilhouettes };
+    }),
+
+  selectModel: (selectedModelId) => set({ selectedModelId }),
+
+  setModelTransform: (id, transform) =>
+    set((s) => ({
+      models: s.models.map((m) => (m.id === id ? { ...m, transform } : m)),
+    })),
+
+  resetSelectedTransform: () =>
+    set((s) => ({
+      models: s.models.map((m) =>
+        m.id === s.selectedModelId
+          ? {
+              ...m,
+              transform: {
+                position: [0, 0, 0],
+                rotation: [0, 0, 0],
+              },
+            }
+          : m
+      ),
+    })),
+
+  setSilhouetteView: (silhouetteView) => set({ silhouetteView }),
+
+  extractModelSilhouette: (modelId) =>
+    set((s) => {
+      const pm = s.models.find((m) => m.id === modelId);
+      if (!pm) return {};
+      const field = buildSilhouetteField(pm.model, pm.transform, s.silhouetteView);
+      const prev = s.modelSilhouettes[modelId];
+      const sil: ModelSilhouette = {
+        modelId,
+        view: s.silhouetteView,
+        field,
+        // Keep the user's offset; reset extrude to the model depth on re-extract.
+        offset: prev && prev.view === s.silhouetteView ? prev.offset : 0,
+        extrudeDepth:
+          prev && prev.view === s.silhouetteView
+            ? prev.extrudeDepth
+            : field.depthSize,
+        draftDeg: prev && prev.view === s.silhouetteView ? prev.draftDeg : 0,
+      };
+      return {
+        modelSilhouettes: { ...s.modelSilhouettes, [modelId]: sil },
+        // Keep the legacy global silhouette alive for steps 3/4 continuity.
+        silhouettes: {
+          ...s.silhouettes,
+          [s.silhouetteView]: toLegacySilhouette(field),
+        },
+      };
+    }),
+
+  setSilhouetteOffset: (modelId, offset) =>
+    set((s) => {
+      const cur = s.modelSilhouettes[modelId];
+      if (!cur) return {};
+      return {
+        modelSilhouettes: {
+          ...s.modelSilhouettes,
+          [modelId]: { ...cur, offset },
+        },
+      };
+    }),
+
+  setSilhouetteExtrude: (modelId, extrudeDepth) =>
+    set((s) => {
+      const cur = s.modelSilhouettes[modelId];
+      if (!cur) return {};
+      return {
+        modelSilhouettes: {
+          ...s.modelSilhouettes,
+          [modelId]: { ...cur, extrudeDepth: Math.max(0.1, extrudeDepth) },
+        },
+      };
+    }),
+
+  setSilhouetteDraft: (modelId, draftDeg) =>
+    set((s) => {
+      const cur = s.modelSilhouettes[modelId];
+      if (!cur) return {};
+      return {
+        modelSilhouettes: {
+          ...s.modelSilhouettes,
+          [modelId]: { ...cur, draftDeg },
+        },
+      };
+    }),
+
+  clearModelSilhouette: (modelId) =>
+    set((s) => {
+      const modelSilhouettes = { ...s.modelSilhouettes };
+      delete modelSilhouettes[modelId];
+      return { modelSilhouettes };
+    }),
 
   setSilhouette: (view, sil) =>
     set((s) => ({ silhouettes: { ...s.silhouettes, [view]: sil } })),
@@ -115,3 +311,8 @@ export const useStore = create<AppStore>((set) => ({
 
   reset: () => set({ ...initialProject, currentStep: 1 }),
 }));
+
+/** The currently selected placed model, or undefined. */
+export function selectedPlacedModel(s: AppStore): PlacedModel | undefined {
+  return s.models.find((m) => m.id === s.selectedModelId) ?? s.models[0];
+}

@@ -2,6 +2,7 @@ import { useStore } from "./store/useStore";
 import { getStep, STEPS, STAGE_LABELS } from "./pipeline/steps";
 import { Viewport } from "./components/Viewport";
 import { PanelHost } from "./components/PanelHost";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App shell: top bar, step sidebar, central viewport, contextual right panel.
@@ -11,13 +12,13 @@ export function App() {
   const currentStep = useStore((s) => s.currentStep);
   const setStep = useStore((s) => s.setStep);
   const reset = useStore((s) => s.reset);
-  const model = useStore((s) => s.model);
+  const models = useStore((s) => s.models);
 
   const step = getStep(currentStep);
 
   // crude completion heuristic for the sidebar checkmarks
   const done = useStore((s) => ({
-    1: !!s.model,
+    1: s.models.length > 0,
     2: Object.keys(s.silhouettes).length > 0,
     3: Object.keys(s.drafts).length > 0,
     4: s.insertFoam.ready,
@@ -40,7 +41,11 @@ export function App() {
         <span className="badge">스켈레톤</span>
         <span className="spacer" />
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          {model ? model.fileName : "모델 미로드"}
+          {models.length === 0
+            ? "모델 미로드"
+            : models.length === 1
+            ? models[0].name
+            : `${models.length}개 모델`}
         </span>
         <button className="btn secondary" onClick={reset}>
           새 프로젝트
@@ -71,7 +76,9 @@ export function App() {
         ))}
       </div>
 
-      <Viewport kind={step.viewport} />
+      <ErrorBoundary>
+        <Viewport kind={step.viewport} />
+      </ErrorBoundary>
 
       <div className="panel">
         <PanelHost step={currentStep} />

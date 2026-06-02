@@ -17,7 +17,7 @@ export interface StepDef {
 
 export const STEPS: StepDef[] = [
   { id: 1, title: "제품 3D 데이터 import (STEP)", short: "Import", stage: "A", viewport: "3d" },
-  { id: 2, title: "뷰별 아웃라인 실루엣 추출", short: "실루엣", stage: "A", viewport: "2d-silhouette" },
+  { id: 2, title: "뷰별 아웃라인 실루엣 추출", short: "실루엣", stage: "A", viewport: "3d" },
   { id: 3, title: "구배 각도 적용", short: "구배각", stage: "A", viewport: "2d-silhouette" },
   { id: 4, title: "박스 폼에서 불린 차집합", short: "불린", stage: "A", viewport: "3d" },
   { id: 5, title: "인서트 폼 제작 확인", short: "인서트", stage: "A", viewport: "3d" },
