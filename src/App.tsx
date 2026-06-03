@@ -19,17 +19,16 @@ export function App() {
   // crude completion heuristic for the sidebar checkmarks
   const done = useStore((s) => ({
     1: s.models.length > 0,
-    2: Object.keys(s.silhouettes).length > 0,
-    3: Object.keys(s.drafts).length > 0,
+    2: Object.keys(s.modelSilhouettes).length > 0,
+    3: s.insertFoam.ready,
     4: s.insertFoam.ready,
-    5: s.insertFoam.ready,
-    6: !!s.boxPresetId,
-    7: true,
-    8: !!s.boxPresetId,
-    9: true,
-    10: s.textElements.length > 0,
-    11: !!s.boxPresetId,
-    12: s.insertFoam.ready,
+    5: !!s.boxPresetId,
+    6: true,
+    7: !!s.boxPresetId,
+    8: true,
+    9: s.textElements.length > 0,
+    10: !!s.boxPresetId,
+    11: s.insertFoam.ready,
   } as Record<number, boolean>));
 
   const stages: Array<"A" | "B"> = ["A", "B"];

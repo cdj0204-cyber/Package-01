@@ -127,14 +127,16 @@ export function buildSilhouetteField(
   const dv = Math.max(1e-3, maxV - minV);
   const maxExtent = Math.max(du, dv);
   const pad = Math.max(15, maxExtent * 0.35);
-  // ~190 cells across the larger dimension, clamped for safety / performance.
-  let cell = maxExtent / 190;
-  cell = Math.max(0.15, cell);
+  // ~320 cells across the larger dimension → finer iso-contours (smoother walls
+  // & cleaner booleans). The SDF/contour are computed only on extraction, so the
+  // higher resolution is a one-time cost, not a per-frame one.
+  let cell = maxExtent / 320;
+  cell = Math.max(0.08, cell);
   const originU = minU - pad;
   const originV = minV - pad;
   let nu = Math.ceil((du + 2 * pad) / cell) + 1;
   let nv = Math.ceil((dv + 2 * pad) / cell) + 1;
-  const CAP = 360;
+  const CAP = 560;
   if (nu > CAP) {
     cell *= nu / CAP;
     nu = CAP;
@@ -465,7 +467,8 @@ function simplify(
     if (x > maxX) maxX = x;
     if (y > maxY) maxY = y;
   }
-  const eps = Math.max(0.05, Math.max(maxX - minX, maxY - minY) * 0.0025);
+  // Light simplification only — keep enough contour fidelity for smooth walls.
+  const eps = Math.max(0.02, Math.max(maxX - minX, maxY - minY) * 0.0008);
 
   const keep = new Uint8Array(loop.length);
   keep[0] = 1;
@@ -547,14 +550,25 @@ export function buildExtrudeMesh(
     return positions.length / 3 - 1;
   };
 
-  // Caps: triangulate each ring (outer + its holes) with its own outline.
+  // Resample resolution for ring loops — shared by caps and walls. Higher = more
+  // wall facets → smoother curved surfaces and cleaner boolean cuts in Step 3.
+  const M = 220;
+
+  // Caps: triangulate each ring (outer + its holes). The rings are resampled to
+  // the SAME M points the walls use, so the cap boundary and the wall rings have
+  // identical vertices — once welded the solid is a watertight manifold, which
+  // is what lets the boolean (CSG) produce clean cuts instead of torn slivers.
   const cap = (loops: Array<Array<[number, number]>>, depth: number, up: boolean) => {
     if (!loops.length) return;
     const ranked = loops
       .map((l) => ({ l, a: signedArea(l) }))
       .sort((p, q) => Math.abs(q.a) - Math.abs(p.a));
-    const outer = ranked[0].a < 0 ? ranked[0].l.slice().reverse() : ranked[0].l;
-    const holes = ranked.slice(1).map((h) => (h.a > 0 ? h.l.slice().reverse() : h.l));
+    // resampleAlign returns CCW; keep outer CCW, flip holes to CW for triangulation.
+    const outer = resampleAlign(ranked[0].l, M);
+    const holes = ranked.slice(1).map((h) => {
+      const r = resampleAlign(h.l, M);
+      return signedArea(r) > 0 ? r.slice().reverse() : r;
+    });
     const flat = [outer, ...holes].flat();
     const start = positions.length / 3;
     for (const p of flat) addVert(p, depth);
@@ -571,7 +585,6 @@ export function buildExtrudeMesh(
   cap(topLoops, top, true);
 
   // Walls: loft matched base→top loops (resampled + angle-aligned to avoid twist).
-  const M = 96;
   const baseMatch = matchLoops(baseLoops);
   const topMatch = matchLoops(topLoops);
   const usedTop = new Set<number>();
@@ -626,6 +639,44 @@ export function buildExtrudeMesh(
     positions: new Float32Array(positions),
     indices: new Uint32Array(indices),
     color,
+  };
+}
+
+/** The drafted top iso-level for a silhouette (matches buildExtrudeMesh). */
+function draftTopIso(sil: ModelSilhouette): number {
+  const field = sil.field;
+  const inset = Math.tan((sil.draftDeg * Math.PI) / 180) * sil.extrudeDepth;
+  let topIso = sil.offset - inset;
+  let mn = Infinity;
+  for (let i = 0; i < field.sdf.length; i++)
+    if (field.sdf[i] < mn) mn = field.sdf[i];
+  const minIso = mn + field.cell;
+  if (topIso < minIso) topIso = minIso;
+  if (topIso > field.pad) topIso = field.pad;
+  return topIso;
+}
+
+/**
+ * The base (bottom) and top cap-rim loops of the extruded solid, as world-space
+ * XYZ point loops. These are exactly the horizontal boundary outlines of the
+ * solid — used to draw a clean top/bottom outline without the wall edges.
+ */
+export function extrudeCapLoops(sil: ModelSilhouette): {
+  base: Array<Array<[number, number, number]>>;
+  top: Array<Array<[number, number, number]>>;
+} {
+  const field = sil.field;
+  const view = sil.view;
+  const baseDepth = field.depthBase;
+  const topDepth = baseDepth + sil.extrudeDepth;
+  const toWorld = (
+    loops: Array<Array<[number, number]>>,
+    depth: number
+  ): Array<Array<[number, number, number]>> =>
+    loops.map((l) => l.map((p) => uvToWorld(p[0], p[1], depth, view)));
+  return {
+    base: toWorld(contourAt(field, sil.offset), baseDepth),
+    top: toWorld(contourAt(field, draftTopIso(sil)), topDepth),
   };
 }
 
@@ -726,6 +777,49 @@ function apexClose(
   for (let i = 0; i < M; i++) {
     indices.push(ringStart + i, ringStart + ((i + 1) % M), apex);
   }
+}
+
+/** World-space axis-aligned bounding box of a silhouette's extruded solid. */
+export function extrudeAABB(
+  sil: ModelSilhouette
+): { min: [number, number, number]; max: [number, number, number] } | null {
+  const mesh = buildExtrudeMesh(sil);
+  if (!mesh) return null;
+  const p = mesh.positions;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < p.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const v = p[i + k];
+      if (v < min[k]) min[k] = v;
+      if (v > max[k]) max[k] = v;
+    }
+  }
+  return { min, max };
+}
+
+/** Box placement (XZ centre + base Y) framing one or more extruded solids. */
+export function solidsPlacement(
+  sils: ModelSilhouette[]
+): { cx: number; cz: number; baseY: number } | null {
+  let minX = Infinity,
+    minY = Infinity,
+    minZ = Infinity,
+    maxX = -Infinity,
+    maxZ = -Infinity;
+  let any = false;
+  for (const s of sils) {
+    const b = extrudeAABB(s);
+    if (!b) continue;
+    any = true;
+    minX = Math.min(minX, b.min[0]);
+    maxX = Math.max(maxX, b.max[0]);
+    minZ = Math.min(minZ, b.min[2]);
+    maxZ = Math.max(maxZ, b.max[2]);
+    minY = Math.min(minY, b.min[1]);
+  }
+  if (!any) return null;
+  return { cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2, baseY: minY };
 }
 
 /** Legacy Silhouette (for steps 3/4 continuity) from the offset-0 outline. */

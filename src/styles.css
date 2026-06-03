@@ -173,6 +173,16 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 
+/* Segmented control (e.g. box-form edit mode: resize / move / rotate). */
+.seg-row { display: flex; gap: 6px; }
+.seg-btn {
+  flex: 1; background: var(--panel-2); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.seg-btn:hover { border-color: var(--accent-2); color: var(--text); }
+.seg-btn.on { background: var(--accent); color: #111; border-color: var(--accent); }
+
 .preset-card {
   border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   margin-bottom: 8px; cursor: pointer; background: var(--panel-2);

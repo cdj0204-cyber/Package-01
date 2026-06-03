@@ -75,6 +75,15 @@ export type CameraView =
   | "right"
   | "left";
 
+/** Pose of the Step-3 box form: centre position + Euler rotation (radians). */
+export type BoxTransform = {
+  position: [number, number, number];
+  rotation: [number, number, number];
+};
+
+/** How the Step-3 box-form gizmo behaves. */
+export type BoxEditMode = "resize" | "move" | "rotate";
+
 export const IDENTITY_TRANSFORM: ModelTransform = {
   position: [0, 0, 0],
   rotation: [0, 0, 0],
@@ -121,6 +130,14 @@ export interface AppStore extends ProjectState {
   setSilhouetteDraft: (modelId: string, draftDeg: number) => void;
   clearModelSilhouette: (modelId: string) => void;
 
+  // ── Step 3 — box-form pose + gizmo mode ──────────────────────────────────────
+  /** Box-form pose (centre + rotation), or null for auto-framing on the solids. */
+  boxTransform: BoxTransform | null;
+  setBoxTransform: (t: BoxTransform | null) => void;
+  /** Which gizmo the box form is edited with (resize handles / move / rotate). */
+  boxEditMode: BoxEditMode;
+  setBoxEditMode: (m: BoxEditMode) => void;
+
   // ── Step mutations ─────────────────────────────────────────────────────────
   setSilhouette: (view: ViewName, sil: Silhouette) => void;
   setDraft: (view: ViewName, draft: DraftConfig) => void;
@@ -148,6 +165,10 @@ export const useStore = create<AppStore>((set) => ({
   setGizmoMode: (gizmoMode) => set({ gizmoMode }),
   cameraView: "perspective",
   setCameraView: (cameraView) => set({ cameraView }),
+  boxTransform: null,
+  setBoxTransform: (boxTransform) => set({ boxTransform }),
+  boxEditMode: "resize",
+  setBoxEditMode: (boxEditMode) => set({ boxEditMode }),
 
   addModels: (items) =>
     set((s) => {
@@ -309,7 +330,13 @@ export const useStore = create<AppStore>((set) => ({
   removeText: (id) =>
     set((s) => ({ textElements: s.textElements.filter((t) => t.id !== id) })),
 
-  reset: () => set({ ...initialProject, currentStep: 1 }),
+  reset: () =>
+    set({
+      ...initialProject,
+      currentStep: 1,
+      boxTransform: null,
+      boxEditMode: "resize",
+    }),
 }));
 
 /** The currently selected placed model, or undefined. */

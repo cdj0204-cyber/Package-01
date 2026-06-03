@@ -3,8 +3,16 @@ import { useStore } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
 import { VIEW_NAMES, type ViewName } from "../types";
 import { importStepFile } from "../geometry/stepImport";
-import { buildBlockMesh, subtractCavity } from "../geometry/boolean";
-import { buildDraftedPlug } from "../geometry/draft";
+import {
+  buildBoxLocalMesh,
+  subtractSolids,
+  type BoxPose,
+} from "../geometry/boolean";
+import {
+  buildExtrudeMesh,
+  extrudeAABB,
+  solidsPlacement,
+} from "../geometry/silhouetteField";
 import { exportMesh, downloadBlob, type MeshFormat } from "../geometry/exporters";
 import {
   worldAlignValue,
@@ -55,16 +63,15 @@ function StepBody({ step }: { step: number }) {
   switch (step) {
     case 1: return <Step1Import />;
     case 2: return <Step2Silhouette />;
-    case 3: return <Step3Draft />;
-    case 4: return <Step4Boolean />;
-    case 5: return <Step5Insert />;
-    case 6: return <Step6BoxType />;
-    case 7: return <Step7Sizing />;
-    case 8: return <Step8Render />;
-    case 9: return <Step9Artwork />;
-    case 10: return <Step10Text />;
-    case 11: return <Step11Dieline />;
-    case 12: return <Step12FoamExport />;
+    case 3: return <Step4Boolean />;
+    case 4: return <Step5Insert />;
+    case 5: return <Step6BoxType />;
+    case 6: return <Step7Sizing />;
+    case 7: return <Step8Render />;
+    case 8: return <Step9Artwork />;
+    case 9: return <Step10Text />;
+    case 10: return <Step11Dieline />;
+    case 11: return <Step12FoamExport />;
     default: return null;
   }
 }
@@ -728,83 +735,74 @@ function SilhouetteEditor({
   );
 }
 
-// ── Step 3 ────────────────────────────────────────────────────────────────────
-function Step3Draft() {
-  const drafts = useStore((s) => s.drafts);
-  const setDraft = useStore((s) => s.setDraft);
-  const silhouettes = useStore((s) => s.silhouettes);
-  const view = useStore((s) => s.artwork.view);
-  const cur = drafts[view] ?? { view, angleDeg: 3, depth: 30 };
-
-  return (
-    <div>
-      <div className="note" style={{ marginTop: 0, marginBottom: 12 }}>
-        구배각은 이제 <strong>Step 2</strong>에서 개체별로 설정합니다(익스트루드
-        솔리드에 직접 적용). 아래 값은 기존 블록/불린 미리보기용 전역 설정입니다.
-      </div>
-      <p className="hint">
-        선택한 뷰의 실루엣에 구배(draft) 각도와 인출 깊이를 지정합니다. 각도가
-        클수록 바닥으로 갈수록 단면이 좁아집니다.
-      </p>
-      <div className="field">
-        <label>대상 뷰</label>
-        <input type="text" value={view} disabled />
-      </div>
-      <div className="field">
-        <label>구배 각도 (°)</label>
-        <input
-          type="number"
-          value={cur.angleDeg}
-          step={0.5}
-          onChange={(e) =>
-            setDraft(view, { ...cur, angleDeg: Number(e.target.value) })
-          }
-        />
-      </div>
-      <div className="field">
-        <label>인출 깊이 (mm)</label>
-        <input
-          type="number"
-          value={cur.depth}
-          onChange={(e) =>
-            setDraft(view, { ...cur, depth: Number(e.target.value) })
-          }
-        />
-      </div>
-      {!silhouettes[view] && (
-        <div className="note warn">이 뷰의 실루엣을 먼저 추출하세요 (Step 2).</div>
-      )}
-    </div>
-  );
-}
-
-// ── Step 4 ────────────────────────────────────────────────────────────────────
+// ── Step 3 (불린) ─────────────────────────────────────────────────────────────
 function Step4Boolean() {
   const models = useStore((s) => s.models);
+  const selectedModelId = useStore((s) => s.selectedModelId);
+  const selectModel = useStore((s) => s.selectModel);
+  const modelSilhouettes = useStore((s) => s.modelSilhouettes);
   const boxForm = useStore((s) => s.boxForm);
   const updateBoxForm = useStore((s) => s.updateBoxForm);
-  const silhouettes = useStore((s) => s.silhouettes);
-  const drafts = useStore((s) => s.drafts);
+  const boxTransform = useStore((s) => s.boxTransform);
+  const setBoxTransform = useStore((s) => s.setBoxTransform);
+  const boxEditMode = useStore((s) => s.boxEditMode);
+  const setBoxEditMode = useStore((s) => s.setBoxEditMode);
   const setInsert = useStore((s) => s.setInsertFoam);
+  const foam = useStore((s) => s.insertFoam);
+  const [busy, setBusy] = useState(false);
+
+  // Solids carried over from Step 2 (offset + draft applied).
+  const solids = models
+    .map((m) => ({ pm: m, sil: modelSilhouettes[m.id] }))
+    .filter((x) => x.sil);
+
+  // Box pose: explicit (after align/gizmo edit) or auto-framed on all solids.
+  function autoPose(): BoxPose | null {
+    const place = solidsPlacement(solids.map((s) => s.sil!));
+    if (!place) return null;
+    return {
+      position: [place.cx, place.baseY + boxForm.height / 2, place.cz],
+      rotation: [0, 0, 0],
+    };
+  }
+
+  // Align the box-form centre to the selected solid (XZ centre + sit on its base).
+  function alignToSelected() {
+    const target = solids.find((x) => x.pm.id === selectedModelId) ?? solids[0];
+    if (!target) return;
+    const box = extrudeAABB(target.sil!);
+    if (!box) return;
+    setBoxTransform({
+      position: [
+        (box.min[0] + box.max[0]) / 2,
+        box.min[1] + boxForm.height / 2,
+        (box.min[2] + box.max[2]) / 2,
+      ],
+      rotation: [0, 0, 0],
+    });
+  }
 
   function run() {
-    if (!models.length) return;
-    // Combined XY centre of all imported models (the block holds them all).
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const pm of models) {
-      minX = Math.min(minX, pm.model.bbox.min[0]);
-      minY = Math.min(minY, pm.model.bbox.min[1]);
-      maxX = Math.max(maxX, pm.model.bbox.max[0]);
-      maxY = Math.max(maxY, pm.model.bbox.max[1]);
+    if (!solids.length) return;
+    const pose = boxTransform ?? autoPose();
+    if (!pose) return;
+    setBusy(true);
+    try {
+      const block = buildBoxLocalMesh(boxForm);
+      const tools = solids
+        .map((s) => buildExtrudeMesh(s.sil!))
+        .filter(Boolean) as Array<NonNullable<ReturnType<typeof buildExtrudeMesh>>>;
+      setInsert(subtractSolids(block, pose, tools));
+    } finally {
+      setBusy(false);
     }
-    const center: [number, number] = [(minX + maxX) / 2, (minY + maxY) / 2];
-    const block = buildBlockMesh(boxForm, center);
-    const sil = silhouettes.top ?? Object.values(silhouettes)[0];
-    const draft = drafts.top ?? Object.values(drafts)[0];
-    if (!sil || !draft) return;
-    const plug = buildDraftedPlug(sil, draft, boxForm.height);
-    setInsert(subtractCavity(block, plug, boxForm));
   }
+
+  const EDIT_MODES: Array<{ id: typeof boxEditMode; label: string; hint: string }> = [
+    { id: "resize", label: "크기조절", hint: "면의 화살표를 잡고 늘려 볼륨 조절" },
+    { id: "move", label: "이동", hint: "박스 폼 위치 이동" },
+    { id: "rotate", label: "회전", hint: "박스 폼 회전" },
+  ];
 
   const f = (k: keyof typeof boxForm, label: string) => (
     <div className="field" key={k}>
@@ -817,21 +815,91 @@ function Step4Boolean() {
     </div>
   );
 
+  if (!solids.length) {
+    return (
+      <div className="note warn">
+        먼저 Step 2에서 실루엣을 추출해 익스트루드 솔리드를 만드세요.
+      </div>
+    );
+  }
+
   return (
     <div>
       <p className="hint">
-        육면체 폼에서 구배 솔리드를 빼냅니다(불린 차집합). 바닥이 뚫리지 않도록
-        바닥 오프셋을 둡니다.
-        <br />
-        <span className="warn">(스켈레톤: 실제 CSG 미적용 — 블록/플러그 미리보기)</span>
+        Step 2에서 만든 솔리드(오프셋·구배각 적용)를 그대로 가져옵니다. 박스 폼의
+        볼륨을 만들고(면 화살표로 크기 조절 / 이동 / 회전), 솔리드가 박스 폼 안에
+        들어가면 겹치는 부분이 연두색으로 미리 표시됩니다. 마지막에 불린 차집합으로
+        인서트 폼을 만듭니다.
       </p>
-      {f("width", "폼 가로 W (mm)")}
-      {f("depth", "폼 세로 D (mm)")}
-      {f("height", "폼 높이 H (mm)")}
-      {f("floorOffset", "바닥 오프셋 (mm)")}
-      <button className="btn block" disabled={!models.length} onClick={run}>
-        불린 차집합 실행
+
+      <div className="list-head" style={{ marginBottom: 6 }}>박스 폼 편집 모드</div>
+      <div className="seg-row">
+        {EDIT_MODES.map((m) => (
+          <button
+            key={m.id}
+            className={"seg-btn" + (boxEditMode === m.id ? " on" : "")}
+            onClick={() => setBoxEditMode(m.id)}
+            title={m.hint}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <div className="note" style={{ marginTop: 6 }}>
+        {EDIT_MODES.find((m) => m.id === boxEditMode)?.hint}
+      </div>
+
+      <div className="list-head" style={{ margin: "10px 0 6px" }}>박스 폼 크기</div>
+      {f("width", "폼 가로 W · X (mm)")}
+      {f("height", "폼 높이 H · Y (mm)")}
+      {f("depth", "폼 세로 D · Z (mm)")}
+
+      <div className="model-list">
+        <div className="list-head">정렬 기준 솔리드 선택</div>
+        {solids.map(({ pm }) => (
+          <div
+            key={pm.id}
+            className={"model-item" + (pm.id === selectedModelId ? " sel" : "")}
+            onClick={() => selectModel(pm.id)}
+          >
+            <div className="grow">
+              <div className="name">{pm.name}</div>
+              <div className="meta">{modelSilhouettes[pm.id]?.view} 뷰 솔리드</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button
+        className="btn block secondary"
+        style={{ marginTop: 8 }}
+        disabled={!selectedModelId}
+        onClick={alignToSelected}
+        title="선택한 솔리드에 박스 폼 위치를 맞춥니다 (XZ 중심 + 바닥 높이)"
+      >
+        ⟱ 선택 솔리드에 박스 폼 정렬
       </button>
+
+      <div className="note" style={{ marginTop: 6 }}>
+        박스 폼 중심: {boxTransform
+          ? `X ${r2(boxTransform.position[0])} · Y ${r2(boxTransform.position[1])} · Z ${r2(boxTransform.position[2])}`
+          : "자동 (전체 솔리드 기준)"}
+      </div>
+
+      <button
+        className="btn block"
+        style={{ marginTop: 10 }}
+        disabled={busy}
+        onClick={run}
+      >
+        {busy ? "계산 중…" : `불린 차집합 실행 (솔리드 ${solids.length}개)`}
+      </button>
+
+      {foam.ready && (
+        <div className="note" style={{ color: "var(--ok)", marginTop: 8 }}>
+          ✓ 인서트 폼 생성 완료 — Step 4에서 확인할 수 있습니다.
+        </div>
+      )}
     </div>
   );
 }
@@ -843,20 +911,20 @@ function Step5Insert() {
   return (
     <div>
       <p className="hint">
-        제작된 인서트 폼 결과를 확인합니다. 이상이 없으면 STEP 12에서 3D 포맷으로
-        내보낼 수 있습니다.
+        제작된 인서트 폼 결과를 확인합니다. 이상이 없으면 마지막 단계에서 3D
+        포맷으로 내보낼 수 있습니다.
       </p>
       {foam.ready ? (
         <div className="note" style={{ color: "var(--ok)" }}>
           ✓ 인서트 폼이 생성되었습니다.
           <div className="btn-row">
-            <button className="btn" onClick={() => setStep(12)}>
-              폼 다운로드로 이동 (Step 12)
+            <button className="btn" onClick={() => setStep(11)}>
+              폼 다운로드로 이동 (Step 11)
             </button>
           </div>
         </div>
       ) : (
-        <div className="note warn">Step 4에서 불린 차집합을 먼저 실행하세요.</div>
+        <div className="note warn">Step 3에서 불린 차집합을 먼저 실행하세요.</div>
       )}
     </div>
   );
@@ -959,7 +1027,7 @@ function Step8Render() {
         유형: {presetId ?? "(미선택)"}<br />
         볼륨: {sizing.width} × {sizing.depth} × {sizing.height} mm
       </div>
-      {!presetId && <div className="note warn">박스 유형을 먼저 선택하세요 (Step 6).</div>}
+      {!presetId && <div className="note warn">박스 유형을 먼저 선택하세요 (Step 5).</div>}
     </div>
   );
 }
@@ -1089,7 +1157,7 @@ function Step11Dieline() {
         일러스트와 텍스트가 포함된 상태로 상자 제작용 도면을 내보냅니다.
         (재단=실선, 접지=점선)
       </p>
-      {!presetObj && <div className="note warn">박스 유형을 먼저 선택하세요 (Step 6).</div>}
+      {!presetObj && <div className="note warn">박스 유형을 먼저 선택하세요 (Step 5).</div>}
       <div className="btn-row">
         <button className="btn" disabled={!presetObj} onClick={() => dl("svg")}>SVG</button>
         <button className="btn" disabled={!presetObj} onClick={() => dl("dxf")}>DXF</button>
@@ -1122,9 +1190,9 @@ function Step12FoamExport() {
   return (
     <div>
       <p className="hint">
-        1~4번 과정으로 만든 인서트 폼을 3D 포맷으로 내보냅니다.
+        1~3번 과정으로 만든 인서트 폼을 3D 포맷으로 내보냅니다.
       </p>
-      {!foam.ready && <div className="note warn">먼저 인서트 폼을 생성하세요 (Step 4).</div>}
+      {!foam.ready && <div className="note warn">먼저 인서트 폼을 생성하세요 (Step 3).</div>}
       <div className="btn-row">
         <button className="btn" disabled={!foam.ready} onClick={() => dl("stl")}>STL</button>
         <button className="btn" disabled={!foam.ready} onClick={() => dl("obj")}>OBJ</button>
