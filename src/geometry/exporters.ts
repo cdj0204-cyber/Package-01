@@ -295,51 +295,160 @@ function meshToStep(mesh: ImportedMesh): string {
     );
   }
 
-  // One ADVANCED_FACE per triangle.
-  const faceIds: number[] = [];
-  for (const [a, b, c] of tris) {
-    const corners: Array<[number, number]> = [
-      [a, b],
-      [b, c],
-      [c, a],
-    ];
-    const oeIds: number[] = [];
-    for (const [u, v] of corners) {
-      const ed = edgeOf(u, v);
-      const orient = u === ed.lo ? ".T." : ".F.";
-      oeIds.push(e(`ORIENTED_EDGE('',*,*,#${ecId[ed.id]},${orient})`));
+  // Merge coplanar triangles into planar REGIONS, then emit one ADVANCED_FACE per
+  // region (a single clean planar face with its real outline + holes), instead of
+  // one face per triangle. Flat faces (box outer, cavity floors, straight walls)
+  // become a single face each; only genuinely curved strips stay faceted.
+  const triCount = tris.length;
+  const triEdges: number[][] = [];
+  const edgeTris = new Map<number, number[]>();
+  const triN: Array<[number, number, number]> = [];
+  const triD: number[] = [];
+  for (let ti = 0; ti < triCount; ti++) {
+    const [a, b, c] = tris[ti];
+    const es = [edgeOf(a, b).id, edgeOf(b, c).id, edgeOf(c, a).id];
+    triEdges.push(es);
+    for (const eid of es) {
+      let arr = edgeTris.get(eid);
+      if (!arr) edgeTris.set(eid, (arr = []));
+      arr.push(ti);
     }
-    const loop = e(`EDGE_LOOP('',(${oeIds.map((n) => `#${n}`).join(",")}))`);
-    const bound = e(`FACE_OUTER_BOUND('',#${loop},.T.)`);
-    // Plane: origin = vertex a, axis = outward face normal, ref = a→b.
-    const ax = vx[a * 3],
-      ay = vx[a * 3 + 1],
-      az = vx[a * 3 + 2];
-    const bx = vx[b * 3],
-      by = vx[b * 3 + 1],
-      bz = vx[b * 3 + 2];
-    const cx = vx[c * 3],
-      cy = vx[c * 3 + 1],
-      cz = vx[c * 3 + 2];
+    const ax = vx[a * 3], ay = vx[a * 3 + 1], az = vx[a * 3 + 2];
+    const bx = vx[b * 3], by = vx[b * 3 + 1], bz = vx[b * 3 + 2];
+    const cx = vx[c * 3], cy = vx[c * 3 + 1], cz = vx[c * 3 + 2];
     let nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
     let ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
     let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
     const nl = Math.hypot(nx, ny, nz) || 1;
-    nx /= nl;
-    ny /= nl;
-    nz /= nl;
-    let rx = bx - ax,
-      ry = by - ay,
-      rz = bz - az;
-    const rl = Math.hypot(rx, ry, rz) || 1;
-    rx /= rl;
-    ry /= rl;
-    rz /= rl;
+    nx /= nl; ny /= nl; nz /= nl;
+    triN.push([nx, ny, nz]);
+    triD.push(nx * ax + ny * ay + nz * az);
+  }
+  // Flood-fill coplanar regions (compared to the SEED plane to avoid curvature drift).
+  const region = new Int32Array(triCount).fill(-1);
+  const regRep: number[] = [];
+  const COS = Math.cos((0.5 * Math.PI) / 180); // within 0.5°
+  const DTOL = 5e-3; // mm
+  for (let s = 0; s < triCount; s++) {
+    if (region[s] >= 0) continue;
+    const rid = regRep.length;
+    regRep.push(s);
+    region[s] = rid;
+    const sn = triN[s], sd = triD[s];
+    const stack = [s];
+    while (stack.length) {
+      const ti = stack.pop()!;
+      for (const eid of triEdges[ti]) {
+        for (const tj of edgeTris.get(eid)!) {
+          if (region[tj] >= 0) continue;
+          const nj = triN[tj];
+          if (sn[0] * nj[0] + sn[1] * nj[1] + sn[2] * nj[2] > COS &&
+              Math.abs(triD[tj] - sd) < DTOL) {
+            region[tj] = rid;
+            stack.push(tj);
+          }
+        }
+      }
+    }
+  }
+  // Oriented boundary half-edges per region (triangle winding gives outer CCW / holes CW).
+  const regHE: Array<Array<[number, number]>> = regRep.map(() => []);
+  for (let ti = 0; ti < triCount; ti++) {
+    const r = region[ti];
+    const [a, b, c] = tris[ti];
+    const corners: Array<[number, number]> = [[a, b], [b, c], [c, a]];
+    for (const [u, v] of corners) {
+      const eid = edgeOf(u, v).id;
+      let otherInR = false;
+      for (const tj of edgeTris.get(eid)!) if (tj !== ti && region[tj] === r) otherInR = true;
+      if (!otherInR) regHE[r].push([u, v]);
+    }
+  }
+  const chainLoops = (hes: Array<[number, number]>): Array<Array<[number, number]>> => {
+    const byStart = new Map<number, Array<[number, number]>>();
+    for (const he of hes) {
+      let a = byStart.get(he[0]);
+      if (!a) byStart.set(he[0], (a = []));
+      a.push(he);
+    }
+    const used = new Set<[number, number]>();
+    const loops: Array<Array<[number, number]>> = [];
+    for (const start of hes) {
+      if (used.has(start)) continue;
+      const loop: Array<[number, number]> = [];
+      let cur: [number, number] | undefined = start;
+      let guard = 0;
+      while (cur && !used.has(cur) && guard++ < hes.length + 8) {
+        used.add(cur);
+        loop.push(cur);
+        const nexts = byStart.get(cur[1]);
+        let nx: [number, number] | undefined;
+        if (nexts) for (const e2 of nexts) if (!used.has(e2)) { nx = e2; break; }
+        cur = nx;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    return loops;
+  };
+
+  const faceIds: number[] = [];
+  for (let r = 0; r < regRep.length; r++) {
+    const loops = chainLoops(regHE[r]);
+    if (!loops.length) continue;
+    // Plane basis from the region's seed normal; ref dir = first outer edge.
+    const [nx, ny, nz] = triN[regRep[r]];
+    // 2D projection basis (rDir, n×rDir) to measure signed loop areas.
+    let rx0 = Math.abs(nx) < 0.9 ? 1 : 0, ry0 = Math.abs(nx) < 0.9 ? 0 : 1, rz0 = 0;
+    // make rDir orthogonal to n
+    let dot = rx0 * nx + ry0 * ny + rz0 * nz;
+    rx0 -= dot * nx; ry0 -= dot * ny; rz0 -= dot * nz;
+    let rl0 = Math.hypot(rx0, ry0, rz0) || 1;
+    rx0 /= rl0; ry0 /= rl0; rz0 /= rl0;
+    const sx = ny * rz0 - nz * ry0, sy = nz * rx0 - nx * rz0, sz = nx * ry0 - ny * rx0;
+    const loopArea = (loop: Array<[number, number]>): number => {
+      let area = 0;
+      for (const [u, v] of loop) {
+        const ux = vx[u * 3], uy = vx[u * 3 + 1], uz = vx[u * 3 + 2];
+        const vX = vx[v * 3], vY = vx[v * 3 + 1], vZ = vx[v * 3 + 2];
+        const a2 = ux * rx0 + uy * ry0 + uz * rz0, b2 = ux * sx + uy * sy + uz * sz;
+        const c2 = vX * rx0 + vY * ry0 + vZ * rz0, d2 = vX * sx + vY * sy + vZ * sz;
+        area += a2 * d2 - c2 * b2;
+      }
+      return area / 2;
+    };
+    // Largest |area| loop is the outer boundary; the rest are holes.
+    let outer = 0, outerA = -1;
+    loops.forEach((l, i) => { const a = Math.abs(loopArea(l)); if (a > outerA) { outerA = a; outer = i; } });
+
+    const emitLoop = (loop: Array<[number, number]>): number => {
+      const oeIds: number[] = [];
+      for (const [u, v] of loop) {
+        const ed = edgeOf(u, v);
+        const orient = u === ed.lo ? ".T." : ".F.";
+        oeIds.push(e(`ORIENTED_EDGE('',*,*,#${ecId[ed.id]},${orient})`));
+      }
+      return e(`EDGE_LOOP('',(${oeIds.map((n) => `#${n}`).join(",")}))`);
+    };
+
+    const bounds: number[] = [];
+    loops.forEach((l, i) => {
+      const lp = emitLoop(l);
+      bounds.push(
+        i === outer
+          ? e(`FACE_OUTER_BOUND('',#${lp},.T.)`)
+          : e(`FACE_BOUND('',#${lp},.T.)`)
+      );
+    });
+
+    // Plane placement: origin = first vertex of the outer loop.
+    const o = loops[outer][0][0];
     const nDir = e(`DIRECTION('',(${fmt(nx)},${fmt(ny)},${fmt(nz)}))`);
-    const rDir = e(`DIRECTION('',(${fmt(rx)},${fmt(ry)},${fmt(rz)}))`);
-    const axis = e(`AXIS2_PLACEMENT_3D('',#${cpId[a]},#${nDir},#${rDir})`);
+    const rDir = e(`DIRECTION('',(${fmt(rx0)},${fmt(ry0)},${fmt(rz0)}))`);
+    const axis = e(`AXIS2_PLACEMENT_3D('',#${cpId[o]},#${nDir},#${rDir})`);
     const plane = e(`PLANE('',#${axis})`);
-    faceIds.push(e(`ADVANCED_FACE('',(#${bound}),#${plane},.T.)`));
+    faceIds.push(
+      e(`ADVANCED_FACE('',(${bounds.map((n) => `#${n}`).join(",")}),#${plane},.T.)`)
+    );
   }
 
   const shell = e(

@@ -657,6 +657,37 @@ function draftTopIso(sil: ModelSilhouette): number {
 }
 
 /**
+ * Base + top OUTER rings (arc-length resampled to M points and angle-aligned so
+ * they correspond, exactly like buildExtrudeMesh's walls) as world-space XYZ.
+ * Used to build a smooth B-spline-lofted solid in the OpenCascade NURBS export.
+ * Returns null if the silhouette has no outer contour.
+ */
+export function extrudeOuterRings(
+  sil: ModelSilhouette,
+  M = 80
+): {
+  base: Array<[number, number, number]>;
+  top: Array<[number, number, number]>;
+} | null {
+  const field = sil.field;
+  const view = sil.view;
+  const baseDepth = field.depthBase;
+  const topDepth = baseDepth + sil.extrudeDepth;
+  const baseLoops = contourAt(field, sil.offset);
+  if (!baseLoops.length) return null;
+  const topLoops = contourAt(field, draftTopIso(sil));
+  const bM = matchLoops(baseLoops);
+  const tM = matchLoops(topLoops);
+  if (!bM.outer || !tM.outer) return null;
+  const rb = resampleAlign(bM.outer, M);
+  const rt = resampleAlign(tM.outer, M);
+  return {
+    base: rb.map((p) => uvToWorld(p[0], p[1], baseDepth, view)),
+    top: rt.map((p) => uvToWorld(p[0], p[1], topDepth, view)),
+  };
+}
+
+/**
  * The base (bottom) and top cap-rim loops of the extruded solid, as world-space
  * XYZ point loops. These are exactly the horizontal boundary outlines of the
  * solid — used to draw a clean top/bottom outline without the wall edges.

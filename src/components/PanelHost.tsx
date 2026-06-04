@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useStore } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
-import { VIEW_NAMES, type ViewName } from "../types";
+import { VIEW_NAMES, type ViewName, type ModelSilhouette } from "../types";
 import { importStepFile } from "../geometry/stepImport";
 import {
   buildBoxLocalMesh,
@@ -14,6 +14,7 @@ import {
   solidsPlacement,
 } from "../geometry/silhouetteField";
 import { exportMesh, downloadBlob, type MeshFormat } from "../geometry/exporters";
+import { exportFoamStep } from "../geometry/ocBrep";
 import {
   worldAlignValue,
   type AlignAxis,
@@ -1174,35 +1175,98 @@ function Step11Dieline() {
 // ── Step 12 ───────────────────────────────────────────────────────────────────
 function Step12FoamExport() {
   const foam = useStore((s) => s.insertFoam);
+  const boxForm = useStore((s) => s.boxForm);
+  const boxTransform = useStore((s) => s.boxTransform);
+  const models = useStore((s) => s.models);
+  const modelSilhouettes = useStore((s) => s.modelSilhouettes);
   const [err, setErr] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  function dl(fmt: MeshFormat) {
+  const sils = models
+    .map((m) => modelSilhouettes[m.id])
+    .filter(Boolean) as ModelSilhouette[];
+
+  function poseFor(): BoxPose | null {
+    if (boxTransform) return boxTransform;
+    const place = solidsPlacement(sils);
+    if (!place) return null;
+    return {
+      position: [place.cx, place.baseY + boxForm.height / 2, place.cz],
+      rotation: [0, 0, 0],
+    };
+  }
+
+  // STL / OBJ / FBX — straight from the tessellated foam mesh.
+  function dlMesh(fmt: MeshFormat) {
     setErr(null);
+    setNote(null);
     if (!foam.mesh) return;
     try {
-      const blob = exportMesh(foam.mesh, fmt);
-      downloadBlob(blob, `package01_insert.${fmt}`);
+      downloadBlob(exportMesh(foam.mesh, fmt), `package01_insert.${fmt}`);
     } catch (e: any) {
       setErr(e?.message ?? "export 실패");
+    }
+  }
+
+  // STEP — true-NURBS B-rep via the OpenCascade kernel (box minus B-spline-walled
+  // drafted prisms). Falls back to the faceted mesh STEP if the kernel fails.
+  async function dlStepNurbs() {
+    setErr(null);
+    setNote(null);
+    const pose = poseFor();
+    if (!pose || !sils.length) {
+      setErr("실루엣 솔리드가 필요합니다 (Step 2/3을 먼저 진행하세요).");
+      return;
+    }
+    setBusy(true);
+    setNote("NURBS B-rep 생성 중… (커널 첫 로드는 몇 초 걸립니다)");
+    try {
+      const blob = await exportFoamStep(boxForm, pose, sils);
+      downloadBlob(blob, "package01_insert_nurbs.step");
+      setNote("✓ NURBS STEP 출력 완료 (평면 + B-spline 곡면).");
+    } catch (e: any) {
+      try {
+        if (foam.mesh) {
+          downloadBlob(exportMesh(foam.mesh, "step"), "package01_insert_faceted.step");
+          setNote(null);
+          setErr("NURBS 생성 실패 — 패싯 STEP으로 대체 출력했습니다.");
+        } else throw e;
+      } catch (e2: any) {
+        setNote(null);
+        setErr(e?.message ?? "STEP export 실패");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
     <div>
       <p className="hint">
-        1~3번 과정으로 만든 인서트 폼을 3D 포맷으로 내보냅니다.
+        1~3번 과정으로 만든 인서트 폼을 3D 포맷으로 내보냅니다. STEP은 OpenCascade
+        커널로 진짜 B-rep(평면 + B-spline 곡면) NURBS로 출력합니다.
       </p>
       {!foam.ready && <div className="note warn">먼저 인서트 폼을 생성하세요 (Step 3).</div>}
       <div className="btn-row">
-        <button className="btn" disabled={!foam.ready} onClick={() => dl("stl")}>STL</button>
-        <button className="btn" disabled={!foam.ready} onClick={() => dl("obj")}>OBJ</button>
-        <button className="btn" disabled={!foam.ready} onClick={() => dl("step")}>STEP</button>
-        <button className="btn" disabled={!foam.ready} onClick={() => dl("fbx")}>FBX</button>
+        <button className="btn" disabled={!foam.ready || busy} onClick={() => dlMesh("stl")}>STL</button>
+        <button className="btn" disabled={!foam.ready || busy} onClick={() => dlMesh("obj")}>OBJ</button>
+        <button className="btn" disabled={!foam.ready || busy} onClick={() => dlMesh("fbx")}>FBX</button>
       </div>
+      <button
+        className="btn block"
+        style={{ marginTop: 8 }}
+        disabled={!foam.ready || busy}
+        onClick={dlStepNurbs}
+        title="OpenCascade 커널로 진짜 NURBS STEP 생성"
+      >
+        {busy ? "STEP(NURBS) 생성 중…" : "STEP 내보내기 (NURBS)"}
+      </button>
+      {note && <div className="note" style={{ color: "var(--ok)", marginTop: 8 }}>{note}</div>}
       {err && <div className="note warn">⚠ {err}</div>}
       <div className="note">
-        STL·OBJ·STEP·FBX 모두 즉시 출력됩니다. STEP은 패싯 솔리드(B-rep)로,
-        FBX는 ASCII 메시로 내보냅니다.
+        STL·OBJ·FBX는 메시로 즉시 출력됩니다. STEP은 NURBS B-rep이라 라이노 등에서
+        매끈한 곡면으로 열립니다(첫 출력 시 커널 로딩에 수 초 소요).
       </div>
     </div>
   );
