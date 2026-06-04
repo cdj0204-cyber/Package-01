@@ -71,6 +71,40 @@ function applyPose(m: ImportedMesh, pose: BoxPose): ImportedMesh {
   return { ...m, positions: out };
 }
 
+/**
+ * Force a closed geometry to OUTWARD winding (positive signed volume). The
+ * Step-2 extrude builder emits its caps/walls with a net INWARD orientation
+ * (signed volume < 0, normals facing into the solid). three-bvh-csg decides
+ * inside/outside from face winding, so subtracting an inward-wound tool does the
+ * *opposite* of carving — it keeps the tool's exterior and adds volume instead
+ * of removing it (the bug behind "no cavity appears"). Flipping every triangle
+ * when the signed volume is negative makes the brush a proper solid.
+ */
+function ensureOutward(g: THREE.BufferGeometry): void {
+  const idx = g.index;
+  if (!idx) return;
+  const pos = g.attributes.position.array as ArrayLike<number>;
+  const a = idx.array as Uint32Array | Uint16Array;
+  let v = 0;
+  for (let i = 0; i < a.length; i += 3) {
+    const p = a[i] * 3,
+      q = a[i + 1] * 3,
+      r = a[i + 2] * 3;
+    v +=
+      pos[p] * (pos[q + 1] * pos[r + 2] - pos[q + 2] * pos[r + 1]) -
+      pos[p + 1] * (pos[q] * pos[r + 2] - pos[q + 2] * pos[r]) +
+      pos[p + 2] * (pos[q] * pos[r + 1] - pos[q + 1] * pos[r]);
+  }
+  if (v < 0) {
+    for (let i = 0; i < a.length; i += 3) {
+      const t = a[i + 1];
+      a[i + 1] = a[i + 2];
+      a[i + 2] = t;
+    }
+    idx.needsUpdate = true;
+  }
+}
+
 function toGeometry(m: ImportedMesh): THREE.BufferGeometry {
   let g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(m.positions.slice(), 3));
@@ -83,19 +117,65 @@ function toGeometry(m: ImportedMesh): THREE.BufferGeometry {
   } catch {
     /* keep unwelded geometry on failure */
   }
+  // Normalise winding BEFORE computing normals so the brush is a true solid.
+  ensureOutward(g);
   g.computeVertexNormals();
   return g;
 }
 
 /**
+ * Drop needle/zero-area triangles from an indexed geometry. CSG retriangulation
+ * of the cut faces leaves a lot of these (≈20% of the output) — they carry no
+ * visible surface, but their *direction is numerically garbage* (area → 0), so
+ * they poison smooth-normal averaging (the radial streaks on the cavity floor)
+ * and their stray edges show up in the crease overlay. A triangle is dropped
+ * when its area is ~0 OR it is a needle (its height onto the longest edge is
+ * below `minHeight` mm) — neither covers real surface, so removing them can't
+ * open a visible hole.
+ */
+function dropSliverTris(
+  g: THREE.BufferGeometry,
+  minHeight = 1e-3
+): THREE.BufferGeometry {
+  const idx = g.index;
+  if (!idx) return g;
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  const a = idx.array;
+  const keep: number[] = [];
+  const ax = new THREE.Vector3();
+  const bx = new THREE.Vector3();
+  const cx = new THREE.Vector3();
+  const e1 = new THREE.Vector3();
+  const e2 = new THREE.Vector3();
+  for (let i = 0; i < a.length; i += 3) {
+    ax.fromBufferAttribute(pos, a[i]);
+    bx.fromBufferAttribute(pos, a[i + 1]);
+    cx.fromBufferAttribute(pos, a[i + 2]);
+    const area = e1.subVectors(bx, ax).cross(e2.subVectors(cx, ax)).length() * 0.5;
+    const longest = Math.sqrt(
+      Math.max(
+        ax.distanceToSquared(bx),
+        bx.distanceToSquared(cx),
+        cx.distanceToSquared(ax)
+      )
+    );
+    const height = longest > 1e-9 ? (2 * area) / longest : 0;
+    if (area > 1e-9 && height >= minHeight) {
+      keep.push(a[i], a[i + 1], a[i + 2]);
+    }
+  }
+  if (keep.length === a.length) return g; // nothing dropped
+  const out = g.clone();
+  out.setIndex(keep);
+  return out;
+}
+
+/**
  * Clean a raw CSG result for display: weld duplicate vertices (CSG leaves many
- * coincident ones along cuts), then apply crease-aware normals — curved walls
- * get smooth shading while box faces and the cut edge stay crisp, so the result
- * reads like a clean NURBS-style solid instead of a faceted/torn mesh.
- *
- * (We deliberately do NOT delete sliver triangles: the only slivers left after a
- * watertight-input boolean are coplanar retriangulation fans on flat faces —
- * invisible — and removing them would punch tiny holes in the surface.)
+ * coincident ones along cuts), discard the sliver triangles it scatters across
+ * the cut faces, then apply crease-aware normals — curved walls get smooth
+ * shading while box faces and the cut edge stay crisp, so the result reads like a
+ * clean solid instead of a streaky/torn mesh.
  */
 function finalize(
   geo: THREE.BufferGeometry,
@@ -106,6 +186,13 @@ function finalize(
     g = mergeVertices(g, 1e-4);
   } catch {
     /* keep unwelded geometry on failure */
+  }
+  g = dropSliverTris(g);
+  // Re-weld after dropping slivers so the remaining faces share verts cleanly.
+  try {
+    g = mergeVertices(g, 1e-4);
+  } catch {
+    /* keep geometry on failure */
   }
   let out: THREE.BufferGeometry;
   try {
@@ -125,6 +212,40 @@ function poseBrush(m: ImportedMesh, pose?: BoxPose): Brush {
   }
   b.updateMatrixWorld(true);
   return b;
+}
+
+/**
+ * Over-cut: scale a (world-space) tool mesh outward from its own centroid by a
+ * tiny factor. The default box pose sits the block's bottom face EXACTLY on the
+ * solids' base plane, so the tool's base cap is coincident-coplanar with a block
+ * face — and three-bvh-csg crashes on coincident boundaries ("Cannot read
+ * properties of null (reading 'dot')"), which previously fell through to the
+ * uncut block. Nudging every tool face a hair off the block faces removes the
+ * degeneracy; the sub-0.1% overhang lies outside the block (or deepens a blind
+ * pocket imperceptibly) and is consumed by the boolean — it never shows. This is
+ * the standard CAD "make the cutter longer than the stock" trick.
+ */
+function inflateMesh(m: ImportedMesh, k: number): ImportedMesh {
+  const p = m.positions;
+  const n = p.length / 3;
+  let cx = 0,
+    cy = 0,
+    cz = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    cx += p[i];
+    cy += p[i + 1];
+    cz += p[i + 2];
+  }
+  cx /= n;
+  cy /= n;
+  cz /= n;
+  const out = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    out[i] = cx + (p[i] - cx) * k;
+    out[i + 1] = cy + (p[i + 1] - cy) * k;
+    out[i + 2] = cz + (p[i + 2] - cz) * k;
+  }
+  return { ...m, positions: out };
 }
 
 function toImported(
@@ -158,18 +279,40 @@ export function subtractSolids(
   solids: ImportedMesh[]
 ): InsertFoam {
   if (!solids.length) return { mesh: applyPose(blockLocal, pose), ready: true };
-  try {
-    const evaluator = new Evaluator();
-    evaluator.attributes = ["position", "normal"];
-    let current = poseBrush(blockLocal, pose);
-    for (const s of solids) {
-      const tool = poseBrush(s);
-      current = evaluator.evaluate(current, tool, SUBTRACTION);
-      current.updateMatrixWorld(true);
+  const evaluator = new Evaluator();
+  evaluator.attributes = ["position", "normal"];
+  let current = poseBrush(blockLocal, pose);
+  let cuts = 0;
+
+  // Escalating over-cut factors: the first almost always succeeds; the larger
+  // ones are a safety net for tougher coincidences (e.g. a box face flush with a
+  // tool wall, not just the base). A tool that still won't subtract is skipped
+  // rather than aborting the whole result, so one bad solid can't wipe the cut.
+  const OVERCUT = [1.0008, 1.003, 1.01];
+  for (const s of solids) {
+    for (const k of OVERCUT) {
+      try {
+        const tool = poseBrush(inflateMesh(s, k));
+        const next = evaluator.evaluate(current, tool, SUBTRACTION);
+        next.updateMatrixWorld(true);
+        current = next;
+        cuts++;
+        break;
+      } catch {
+        /* coincident-boundary degeneracy — retry with a larger over-cut */
+      }
     }
-    return { mesh: finalize(current.geometry, [0.75, 0.78, 0.82]), ready: true };
+  }
+
+  try {
+    return {
+      mesh: finalize(current.geometry, [0.75, 0.78, 0.82]),
+      // "ready" once at least one cut landed; an all-fail result is just the
+      // block, so don't advertise it as a finished insert foam.
+      ready: cuts > 0,
+    };
   } catch {
-    return { mesh: applyPose(blockLocal, pose), ready: true };
+    return { mesh: applyPose(blockLocal, pose), ready: false };
   }
 }
 
