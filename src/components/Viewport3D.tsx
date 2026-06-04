@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { useStore } from "../store/useStore";
+import { lineArtBridge } from "./lineArtBridge";
 import type { ImportedMesh, PlacedModel } from "../types";
 import { type BoxPose } from "../geometry/boolean";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../geometry/silhouetteField";
 import type { ModelSilhouette } from "../types";
 import { getBoxPreset } from "../box/presets";
+import { buildBoxModel } from "../box/boxModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // three.js viewport. A package can hold several products, so every imported
@@ -272,11 +274,15 @@ export function Viewport3D() {
   const insertFoam = useStore((s) => s.insertFoam);
   const boxPresetId = useStore((s) => s.boxPresetId);
   const boxSizing = useStore((s) => s.boxSizing);
+  const boxLidSide = useStore((s) => s.boxLidSide);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
   const cameraView = useStore((s) => s.cameraView);
 
-  const showModel = step <= 2;
+  // Raw product models are shown for the Step 1-2 placement work and again for
+  // Step 7 (line-drawing extraction), where the user views the product from the
+  // 7 viewpoints and rotates it before extracting its outline.
+  const showModel = step <= 2 || step === 7;
 
   // ── one-time scene setup ────────────────────────────────────────────────────
   useEffect(() => {
@@ -659,7 +665,11 @@ export function Viewport3D() {
   }, [boxEditMode]);
 
   // ── camera viewpoint: free perspective, or a flat orthographic face ──────────
-  useEffect(() => {
+  // Live models ref so framing reads the latest geometry without re-running on
+  // every transform edit (which would fight the gizmo while dragging).
+  const modelsLiveRef = useRef(models);
+  modelsLiveRef.current = models;
+  const frameCurrentView = useCallback(() => {
     const persp = perspRef.current;
     const ortho = orthoRef.current;
     const orbit = orbitRef.current;
@@ -667,7 +677,7 @@ export function Viewport3D() {
     const mount = mountRef.current;
     if (!persp || !ortho || !orbit || !tc || !mount) return;
 
-    const { center, radius } = combinedBox(models);
+    const { center, radius } = combinedBox(modelsLiveRef.current);
     const { dir, up } = VIEW_DIRS[cameraView] ?? VIEW_DIRS.perspective;
     const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
     const cam: THREE.Camera = cameraView === "perspective" ? persp : ortho;
@@ -708,6 +718,103 @@ export function Viewport3D() {
     orbit.target.set(center[0], center[1], center[2]);
     orbit.update();
   }, [cameraView]);
+
+  // Re-frame whenever the viewpoint changes, and when entering Step 7 (so the
+  // product is centred in the chosen view ready for outline extraction).
+  useEffect(() => {
+    frameCurrentView();
+  }, [frameCurrentView]);
+  useEffect(() => {
+    if (step === 7) frameCurrentView();
+  }, [step, frameCurrentView]);
+
+  // Register the line-art capture for the Step-7 panel: project a model's feature
+  // edges through the CURRENT camera (perspective or any face, incl. manual
+  // orbit) into a 2D line drawing. Refs are stable, so a one-time bind is fine.
+  useEffect(() => {
+    lineArtBridge.capture = (modelId: string) => {
+      const cam = activeCamRef.current;
+      const grp = modelGroupsRef.current.get(modelId);
+      const mount = mountRef.current;
+      if (!cam || !grp || !mount) return null;
+      cam.updateMatrixWorld(true);
+      cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+      grp.pivot.updateMatrixWorld(true);
+      const aspect = (mount.clientWidth || 1) / (mount.clientHeight || 1);
+      const segs: Array<[[number, number], [number, number]]> = [];
+      const a = new THREE.Vector3();
+      const b = new THREE.Vector3();
+      grp.pivot.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!(mesh as any).isMesh || !mesh.geometry) return;
+        // 30° feature edges → a clean technical line drawing (not every facet).
+        const eg = new THREE.EdgesGeometry(mesh.geometry, 30);
+        const pos = eg.getAttribute("position");
+        for (let i = 0; i + 1 < pos.count; i += 2) {
+          a.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).project(cam);
+          b.fromBufferAttribute(pos, i + 1).applyMatrix4(mesh.matrixWorld).project(cam);
+          segs.push([
+            [a.x * aspect, -a.y],
+            [b.x * aspect, -b.y],
+          ]);
+        }
+        eg.dispose();
+      });
+      if (!segs.length) return null;
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (const s of segs)
+        for (const p of s) {
+          if (p[0] < minx) minx = p[0];
+          if (p[0] > maxx) maxx = p[0];
+          if (p[1] < miny) miny = p[1];
+          if (p[1] > maxy) maxy = p[1];
+        }
+      return { segments: segs, bbox: { min: [minx, miny], max: [maxx, maxy] } };
+    };
+    return () => {
+      lineArtBridge.capture = null;
+    };
+  }, []);
+
+  // ── frame the assembled box when entering a Stage B box (3D) step ────────────
+  // After the Stage B reorder these are 5 (유형), 6 (설정), 9 (렌더링); steps 7–8
+  // are 2D artwork/text in between.
+  const isBoxStep = (s: number) => s === 5 || s === 6 || s === 9;
+  const prevStepRef = useRef(1);
+  useEffect(() => {
+    const prev = prevStepRef.current;
+    prevStepRef.current = step;
+    if (!isBoxStep(step) || isBoxStep(prev) || !boxPresetId) return;
+    const persp = perspRef.current;
+    const ortho = orthoRef.current;
+    const orbit = orbitRef.current;
+    const mount = mountRef.current;
+    if (!persp || !ortho || !orbit || !mount) return;
+    const c = combinedCenterXY(models);
+    const { width: bw, depth: bd, height: bh } = boxSizing;
+    const cy = bh * 0.55; // lids extend above, so aim a touch above mid-height
+    const target = new THREE.Vector3(c[0], cy, c[1]);
+    // Bounding-sphere radius of the box + its open lid (which reaches ~2.2·H up).
+    const radius = 0.5 * (Math.hypot(bw, bh * 2.2, bd) || 240);
+    const dir = new THREE.Vector3(0.72, 0.5, 0.95).normalize();
+    if (activeCamRef.current === ortho) {
+      const a = mount.clientWidth / mount.clientHeight;
+      const vs = Math.max(40, radius * 1.15);
+      viewSizeRef.current = vs;
+      ortho.left = -vs * a;
+      ortho.right = vs * a;
+      ortho.top = vs;
+      ortho.bottom = -vs;
+      ortho.updateProjectionMatrix();
+      ortho.position
+        .copy(target)
+        .add(dir.clone().multiplyScalar(radius * 6 + 2000));
+    } else {
+      persp.position.copy(target).add(dir.multiplyScalar(Math.max(240, radius * 3.1)));
+    }
+    orbit.target.copy(target);
+    orbit.update();
+  }, [step, boxPresetId, models, boxSizing]);
 
   // ── reconcile model groups + apply each transform ────────────────────────────
   useEffect(() => {
@@ -882,7 +989,7 @@ export function Viewport3D() {
     disposeGroup(content);
 
     const center = combinedCenterXY(models);
-    const showBox = step >= 5 && step <= 10;
+    const showBox = step >= 5 && step <= 10 && step !== 7; // step 7 shows the product
 
     // Step 4 / 11 — the boolean result (insert foam). Rendered as an OPAQUE
     // shaded solid with edge lines (CAD "shaded + edges" look) so the cut cavity
@@ -917,29 +1024,90 @@ export function Viewport3D() {
       content.add(edges);
     }
 
+    // Steps 5–7 — the chosen box family shown ASSEMBLED with lids/flaps ajar, and
+    // rendered as real corrugated board: every panel is extruded to board
+    // thickness with darker brown flute edges (vertex-coloured), so it reads as a
+    // realistic cardboard box rather than a flat cuboid.
     if (showBox && boxPresetId) {
-      const { width, depth, height } = boxSizing;
-      const g = new THREE.BoxGeometry(width, height, depth);
-      const edges = new THREE.EdgesGeometry(g);
-      const line = new THREE.LineSegments(
-        edges,
-        new THREE.LineBasicMaterial({ color: 0xf0883e })
-      );
-      line.position.set(center[0], height / 2, center[1]);
-      content.add(line);
-      const fill = new THREE.Mesh(
-        g,
+      const preset = getBoxPreset(boxPresetId);
+      const kind = preset?.dielineKind ?? "tuck-end-rte";
+      const { width: bw, depth: bd, height: bh } = boxSizing;
+      const model = buildBoxModel(kind, bw, bd, bh, boxLidSide);
+      const group = new THREE.Group();
+      group.position.set(center[0], 0, center[1]);
+
+      const t = 3; // board thickness 3 mm (side walls doubled to 6 mm below)
+      const face: [number, number, number] = model.color;
+      const edge: [number, number, number] = [
+        face[0] * 0.55,
+        face[1] * 0.5,
+        face[2] * 0.45,
+      ]; // darker flute edge
+      const pos: number[] = [];
+      const col: number[] = [];
+      const v3 = new THREE.Vector3();
+      const e1 = new THREE.Vector3();
+      const e2 = new THREE.Vector3();
+      const push = (p: number[], c: [number, number, number]) => {
+        pos.push(p[0], p[1], p[2]);
+        col.push(c[0], c[1], c[2]);
+      };
+      const tri = (
+        a: number[],
+        b: number[],
+        c: number[],
+        cl: [number, number, number]
+      ) => {
+        push(a, cl);
+        push(b, cl);
+        push(c, cl);
+      };
+      for (const q of model.faces) {
+        const n = q.length; // panels may be quads or rounded N-gons
+        // panel normal (first edge × last edge, valid for any convex polygon)
+        e1.set(q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]);
+        e2.set(
+          q[n - 1][0] - q[0][0],
+          q[n - 1][1] - q[0][1],
+          q[n - 1][2] - q[0][2]
+        );
+        v3.copy(e1).cross(e2).normalize();
+        // Side walls get double board thickness, per request. Only the true
+        // axis-aligned ±X walls have |nx| == 1; tilted lid/tuck wings never do,
+        // so a tight threshold targets the side walls alone.
+        const tf = Math.abs(v3.x) > 0.999 ? t * 2 : t;
+        const o: number[] = [(v3.x * tf) / 2, (v3.y * tf) / 2, (v3.z * tf) / 2];
+        const f = q.map((p) => [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
+        const bk = q.map((p) => [p[0] - o[0], p[1] - o[1], p[2] - o[2]]);
+        // front + back broad faces (kraft) — triangle fan from vertex 0
+        for (let i = 1; i < n - 1; i++) {
+          tri(f[0], f[i], f[i + 1], face);
+          tri(bk[0], bk[i + 1], bk[i], face);
+        }
+        // flute edges (brown) — one per polygon edge
+        for (let i = 0; i < n; i++) {
+          const j = (i + 1) % n;
+          tri(f[i], f[j], bk[j], edge);
+          tri(f[i], bk[j], bk[i], edge);
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(
+        geo,
         new THREE.MeshStandardMaterial({
-          color: 0xb08d57,
-          transparent: true,
-          opacity: 0.25,
+          vertexColors: true,
+          roughness: 0.88,
+          metalness: 0,
+          side: THREE.DoubleSide,
         })
       );
-      fill.position.copy(line.position);
-      content.add(fill);
-      void getBoxPreset;
+      group.add(mesh);
+      content.add(group);
     }
-  }, [step, models, insertFoam, boxPresetId, boxSizing]);
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide]);
 
   // ── Step 3: editable box form (resize face-arrows / move / rotate) ────────────
   useEffect(() => {

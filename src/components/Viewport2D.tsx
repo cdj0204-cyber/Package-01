@@ -15,6 +15,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
   const dragId = useRef<string | null>(null);
 
   const silhouettes = useStore((s) => s.silhouettes);
+  const lineArt = useStore((s) => s.lineArt);
   const artwork = useStore((s) => s.artwork);
   const texts = useStore((s) => s.textElements);
   const updateText = useStore((s) => s.updateText);
@@ -78,27 +79,44 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
       c.strokeStyle = "#2a313c";
       c.strokeRect(o[0], o[1] - faceH * px, faceW * px, faceH * px);
 
-      // product line drawing (silhouette of chosen view) centered per artwork cfg
-      const sil = silhouettes[artwork.view] ?? Object.values(silhouettes)[0];
-      if (sil) {
-        const sw = sil.bbox.max[0] - sil.bbox.min[0];
-        const sh = sil.bbox.max[1] - sil.bbox.min[1];
-        const target = Math.min(faceW, faceH) * artwork.scale;
+      // Product line drawing centred per artwork cfg. Prefer the Step-7 projected
+      // edge line drawing (`lineArt`); fall back to the legacy silhouette outline.
+      const cx = o[0] + artwork.x * faceW * px;
+      const cy = o[1] - artwork.y * faceH * px;
+      const target = Math.min(faceW, faceH) * artwork.scale;
+      c.strokeStyle = preset.lineColor;
+      c.lineWidth = 2;
+      if (lineArt) {
+        const sw = lineArt.bbox.max[0] - lineArt.bbox.min[0] || 1;
+        const sh = lineArt.bbox.max[1] - lineArt.bbox.min[1] || 1;
         const k = (target / Math.max(sw, sh)) * px;
-        const cx = o[0] + artwork.x * faceW * px;
-        const cy = o[1] - artwork.y * faceH * px;
-        c.strokeStyle = preset.lineColor;
-        c.lineWidth = 2;
-        for (const loop of sil.loops) {
-          c.beginPath();
-          loop.forEach((p, i) => {
-            const x = cx + (p[0] - (sil.bbox.min[0] + sw / 2)) * k;
-            const y = cy - (p[1] - (sil.bbox.min[1] + sh / 2)) * k;
-            if (i === 0) c.moveTo(x, y);
-            else c.lineTo(x, y);
-          });
-          c.closePath();
-          c.stroke();
+        const mx = lineArt.bbox.min[0] + sw / 2;
+        const my = lineArt.bbox.min[1] + sh / 2;
+        c.lineWidth = 1;
+        c.beginPath();
+        for (const s of lineArt.segments) {
+          // segment coords are screen-y-down; box face is y-up → negate.
+          c.moveTo(cx + (s[0][0] - mx) * k, cy + (s[0][1] - my) * k);
+          c.lineTo(cx + (s[1][0] - mx) * k, cy + (s[1][1] - my) * k);
+        }
+        c.stroke();
+      } else {
+        const sil = silhouettes[artwork.view] ?? Object.values(silhouettes)[0];
+        if (sil) {
+          const sw = sil.bbox.max[0] - sil.bbox.min[0];
+          const sh = sil.bbox.max[1] - sil.bbox.min[1];
+          const k = (target / Math.max(sw, sh)) * px;
+          for (const loop of sil.loops) {
+            c.beginPath();
+            loop.forEach((p, i) => {
+              const x = cx + (p[0] - (sil.bbox.min[0] + sw / 2)) * k;
+              const y = cy - (p[1] - (sil.bbox.min[1] + sh / 2)) * k;
+              if (i === 0) c.moveTo(x, y);
+              else c.lineTo(x, y);
+            });
+            c.closePath();
+            c.stroke();
+          }
         }
       }
 
@@ -161,7 +179,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
         h - 14
       );
     }
-  }, [kind, silhouettes, artwork, texts, boxPresetId, boxSizing]);
+  }, [kind, silhouettes, lineArt, artwork, texts, boxPresetId, boxSizing]);
 
   // ── interactive text drag (artwork step) ────────────────────────────────────
   function onPointerDown(e: React.PointerEvent) {

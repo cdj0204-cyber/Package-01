@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
-import { useStore } from "../store/useStore";
+import { useStore, type CameraView } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
-import { VIEW_NAMES, type ViewName, type ModelSilhouette } from "../types";
+import { VIEW_NAMES, type ViewName, type ModelSilhouette, type LidSide, type LineArt } from "../types";
+import { lineArtBridge } from "./lineArtBridge";
 import { importStepFile } from "../geometry/stepImport";
 import {
   buildBoxLocalMesh,
@@ -20,7 +21,7 @@ import {
   type AlignAxis,
   type AlignPick,
 } from "../geometry/align";
-import { BOX_PRESETS, ARTWORK_PRESETS } from "../box/presets";
+import { BOX_PRESETS, ARTWORK_PRESETS, getBoxPreset } from "../box/presets";
 import { generateDieline } from "../box/dieline";
 import { exportDieline, type VectorFormat } from "../box/dielineExport";
 
@@ -68,9 +69,9 @@ function StepBody({ step }: { step: number }) {
     case 4: return <Step5Insert />;
     case 5: return <Step6BoxType />;
     case 6: return <Step7Sizing />;
-    case 7: return <Step8Render />;
-    case 8: return <Step9Artwork />;
-    case 9: return <Step10Text />;
+    case 7: return <Step9Artwork />;
+    case 8: return <Step10Text />;
+    case 9: return <Step8Render />;
     case 10: return <Step11Dieline />;
     case 11: return <Step12FoamExport />;
     default: return null;
@@ -340,7 +341,7 @@ function PlacementEditor() {
               </span>
               <input
                 type="number"
-                step={1}
+                step={0.1}
                 value={r2(t.rotation[i] * RAD2DEG)}
                 style={{ borderLeft: `3px solid ${AXIS_COLORS[i]}` }}
                 onChange={(e) => setRotDeg(i, parseFloat(e.target.value))}
@@ -935,16 +936,37 @@ function Step5Insert() {
 function Step6BoxType() {
   const boxPresetId = useStore((s) => s.boxPresetId);
   const setBoxPreset = useStore((s) => s.setBoxPreset);
+  const boxForm = useStore((s) => s.boxForm);
+  const sizing = useStore((s) => s.boxSizing);
+  const update = useStore((s) => s.updateBoxSizing);
+
+  // On picking a box type, default its size to FIT the insert foam we made
+  // (the boxForm block the foam was cut from) plus the offset — so Step 7 opens
+  // already sized to the insert. Only on a real type change, to avoid clobbering
+  // a size the user has since customised.
+  function select(id: string) {
+    if (boxPresetId !== id) {
+      update({
+        mode: "offset",
+        width: boxForm.width + sizing.offset * 2,
+        depth: boxForm.depth + sizing.offset * 2,
+        height: boxForm.height + sizing.offset,
+      });
+    }
+    setBoxPreset(id);
+  }
+
   return (
     <div>
       <p className="hint">
         패키지 상자 유형을 선택합니다. 각 유형은 전개도(도면) 생성 방식이 다릅니다.
+        선택 시 상자 크기는 인서트 폼에 맞춰 자동 설정됩니다.
       </p>
       {BOX_PRESETS.map((p) => (
         <div
           key={p.id}
           className={"preset-card" + (boxPresetId === p.id ? " sel" : "")}
-          onClick={() => setBoxPreset(p.id)}
+          onClick={() => select(p.id)}
         >
           <div className="name">
             {p.name} <span className="tag">{p.family}</span>
@@ -962,6 +984,11 @@ function Step7Sizing() {
   const update = useStore((s) => s.updateBoxSizing);
   const foam = useStore((s) => s.insertFoam);
   const boxForm = useStore((s) => s.boxForm);
+  const boxPresetId = useStore((s) => s.boxPresetId);
+  const lidSide = useStore((s) => s.boxLidSide);
+  const setLidSide = useStore((s) => s.setBoxLidSide);
+  const kind = getBoxPreset(boxPresetId)?.dielineKind;
+  const hasLid = kind === "g-type" || kind === "mailer";
 
   function applyOffset() {
     update({
@@ -1010,6 +1037,15 @@ function Step7Sizing() {
         <input type="number" value={sizing.tolerance}
           onChange={(e) => update({ tolerance: Number(e.target.value) })} />
       </div>
+      {hasLid ? (
+        <div className="field" style={{ marginTop: 14 }}>
+          <label>뚜껑 부착 방향 (G형)</label>
+          <select value={lidSide} onChange={(e) => setLidSide(e.target.value as LidSide)}>
+            <option value="width">가로면에 부착</option>
+            <option value="depth">세로면에 부착</option>
+          </select>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1034,25 +1070,131 @@ function Step8Render() {
 }
 
 // ── Step 9 ────────────────────────────────────────────────────────────────────
+// The 7 viewpoints offered for inspecting the product before extraction.
+const VIEW_BUTTONS: Array<{ id: CameraView; label: string }> = [
+  { id: "perspective", label: "투시 (3D)" },
+  { id: "front", label: "정면 (Front)" },
+  { id: "rear", label: "후면 (Rear)" },
+  { id: "right", label: "우측 (Right)" },
+  { id: "left", label: "좌측 (Left)" },
+  { id: "top", label: "윗면 (Top)" },
+  { id: "bottom", label: "아랫면 (Bottom)" },
+];
+
+// Map a camera viewpoint to the orthographic silhouette plane the outline is
+// Small SVG preview of the extracted line drawing (projected feature edges).
+function LineArtPreview({ art }: { art: LineArt }) {
+  const w = art.bbox.max[0] - art.bbox.min[0] || 1;
+  const h = art.bbox.max[1] - art.bbox.min[1] || 1;
+  const VW = 220, VH = 150, pad = 8;
+  const k = Math.min((VW - pad * 2) / w, (VH - pad * 2) / h);
+  const ox = (VW - w * k) / 2;
+  const oy = (VH - h * k) / 2;
+  const tx = (x: number) => (ox + (x - art.bbox.min[0]) * k).toFixed(1);
+  const ty = (y: number) => (oy + (y - art.bbox.min[1]) * k).toFixed(1);
+  // One <path> with all segments → light even for thousands of edges.
+  const d = art.segments
+    .map((s) => `M${tx(s[0][0])} ${ty(s[0][1])}L${tx(s[1][0])} ${ty(s[1][1])}`)
+    .join("");
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="list-head" style={{ marginBottom: 6 }}>
+        추출된 라인 드로잉 ({art.segments.length} 엣지)
+      </div>
+      <svg
+        width="100%"
+        viewBox={`0 0 ${VW} ${VH}`}
+        style={{ background: "#0d1117", border: "1px solid var(--border)", borderRadius: 4 }}
+      >
+        <path d={d} fill="none" stroke="#f0883e" strokeWidth={0.8} />
+      </svg>
+    </div>
+  );
+}
+
 function Step9Artwork() {
+  const models = useStore((s) => s.models);
+  const selectedModelId = useStore((s) => s.selectedModelId);
+  const selectModel = useStore((s) => s.selectModel);
+  const cameraView = useStore((s) => s.cameraView);
+  const setCameraView = useStore((s) => s.setCameraView);
+  const lineArt = useStore((s) => s.lineArt);
+  const setLineArt = useStore((s) => s.setLineArt);
   const artwork = useStore((s) => s.artwork);
   const update = useStore((s) => s.updateArtwork);
+
+  const targetId = selectedModelId ?? models[0]?.id ?? null;
+
+  // Extract the product's feature edges projected through the CURRENT camera
+  // (any of the 7 viewpoints, perspective included) → a 2D line drawing.
+  function generate() {
+    if (!targetId) return;
+    if (selectedModelId !== targetId) selectModel(targetId);
+    setLineArt(lineArtBridge.capture?.(targetId) ?? null);
+  }
+
+  if (!models.length) {
+    return <div className="note warn">먼저 Step 1에서 제품(STEP)을 불러오세요.</div>;
+  }
+
   return (
     <div>
       <p className="hint">
-        제품 데이터를 선택한 각도(front/side/top)의 라인 드로잉으로 상자 표면에
-        적용합니다. 스타일 프리셋을 선택하세요.
+        제품을 7개 시점에서 살펴보고, 개체를 회전시켜 원하는 각도를 잡은 뒤 현재
+        화면에 보이는 그대로 엣지 라인(특징 모서리)을 추출해 라인 드로잉을
+        생성합니다. 투시 시점에서도 동작합니다.
       </p>
-      <div className="field">
-        <label>드로잉 뷰</label>
-        <select value={artwork.view} onChange={(e) => update({ view: e.target.value as ViewName })}>
-          {VIEW_NAMES.map((v) => <option key={v} value={v}>{v}</option>)}
-        </select>
+
+      <div className="list-head" style={{ marginBottom: 6 }}>시점 선택 (7)</div>
+      <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
+        {VIEW_BUTTONS.map((v) => (
+          <button
+            key={v.id}
+            className={"seg-btn" + (cameraView === v.id ? " on" : "")}
+            onClick={() => setCameraView(v.id)}
+          >
+            {v.label}
+          </button>
+        ))}
       </div>
+
+      {models.length > 1 && (
+        <div className="model-list">
+          <div className="list-head">대상 제품 선택</div>
+          {models.map((m) => (
+            <div
+              key={m.id}
+              className={"model-item" + (m.id === targetId ? " sel" : "")}
+              onClick={() => selectModel(m.id)}
+            >
+              <div className="grow">
+                <div className="name">{m.name}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <PlacementEditor />
+
+      <button
+        className="btn block"
+        style={{ marginTop: 12 }}
+        disabled={!targetId}
+        onClick={generate}
+      >
+        현재 시점에서 엣지 라인 추출 → 라인 드로잉 생성
+      </button>
+
+      {lineArt && <LineArtPreview art={lineArt} />}
+
+      <div className="list-head" style={{ margin: "14px 0 6px" }}>라인 드로잉 스타일</div>
       {ARTWORK_PRESETS.map((p) => (
-        <div key={p.id}
+        <div
+          key={p.id}
           className={"preset-card" + (artwork.presetId === p.id ? " sel" : "")}
-          onClick={() => update({ presetId: p.id })}>
+          onClick={() => update({ presetId: p.id })}
+        >
           <div className="name">{p.name}</div>
           <div className="desc" style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <span style={{ width: 16, height: 16, background: p.background, border: "1px solid #2a313c", display: "inline-block" }} />

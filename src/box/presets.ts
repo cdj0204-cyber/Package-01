@@ -28,13 +28,6 @@ export const BOX_PRESETS: BoxPreset[] = [
     dielineKind: "tuck-end-rte",
   },
   {
-    id: "mailer",
-    name: "메일러 박스 (Roll-End Mailer)",
-    family: "mailer",
-    description: "전자상거래 배송용. 자립형 날개와 잠금 구조.",
-    dielineKind: "mailer",
-  },
-  {
     id: "two-piece-tray",
     name: "투피스 트레이 (Tray + Lid)",
     family: "tray",

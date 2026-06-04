@@ -6,6 +6,8 @@ import type {
   DraftConfig,
   ImportedModel,
   InsertFoam,
+  LidSide,
+  LineArt,
   ModelSilhouette,
   ModelTransform,
   PlacedModel,
@@ -59,6 +61,8 @@ const initialProject: ProjectState = {
   insertFoam: { mesh: null, ready: false },
   boxPresetId: null,
   boxSizing: initialBoxSizing,
+  boxLidSide: "width",
+  lineArt: null,
   artwork: initialArtwork,
   textElements: [],
 };
@@ -144,6 +148,8 @@ export interface AppStore extends ProjectState {
   updateBoxForm: (patch: Partial<BoxForm>) => void;
   setInsertFoam: (foam: InsertFoam) => void;
   setBoxPreset: (id: string) => void;
+  setBoxLidSide: (side: LidSide) => void;
+  setLineArt: (art: LineArt | null) => void;
   updateBoxSizing: (patch: Partial<BoxSizing>) => void;
   updateArtwork: (patch: Partial<ArtworkConfig>) => void;
   addText: (el: TextElement) => void;
@@ -311,6 +317,8 @@ export const useStore = create<AppStore>((set) => ({
   setInsertFoam: (insertFoam) => set({ insertFoam }),
 
   setBoxPreset: (boxPresetId) => set({ boxPresetId }),
+  setBoxLidSide: (boxLidSide) => set({ boxLidSide }),
+  setLineArt: (lineArt) => set({ lineArt }),
 
   updateBoxSizing: (patch) =>
     set((s) => ({ boxSizing: { ...s.boxSizing, ...patch } })),

@@ -139,6 +139,9 @@ export interface BoxPreset {
   dielineKind: DielineKind;
 }
 
+/** Which box edges the G-type lid assembly hinges on. */
+export type LidSide = "width" | "depth";
+
 export type DielineKind =
   | "g-type"
   | "tuck-end-rte"
@@ -165,6 +168,16 @@ export interface ArtworkPreset {
   name: string;
   background: string; // css color
   lineColor: string; // css color
+}
+
+/**
+ * Step 7 — a projected line drawing of the product: the model's feature/crease
+ * edges projected from the chosen viewpoint (works for perspective too). Each
+ * segment is a 2D pair in screen-proportional coords; `bbox` frames them.
+ */
+export interface LineArt {
+  segments: Array<[[number, number], [number, number]]>;
+  bbox: { min: [number, number]; max: [number, number] };
 }
 
 /** Step 9 — which projection of the product is drawn on the surface. */
@@ -207,6 +220,14 @@ export interface ProjectState {
   insertFoam: InsertFoam;
   boxPresetId: string | null;
   boxSizing: BoxSizing;
+  /**
+   * G-type lid orientation — which pair of box edges the lid assembly (lid +
+   * side wings + front tuck + tuck wings) hinges on: "width" (가로, the W-spanning
+   * edge, default) or "depth" (세로, the D-spanning edge).
+   */
+  boxLidSide: LidSide;
+  /** Step 7 — the extracted product line drawing (projected edges), or null. */
+  lineArt: LineArt | null;
   artwork: ArtworkConfig;
   textElements: TextElement[];
 }
