@@ -705,6 +705,38 @@ function dist2(a: [number, number], b: [number, number]): number {
   return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
 }
 
+/**
+ * In-place binomial smoothing of a CLOSED, uniformly-spaced loop: each point is
+ * pulled a little toward the average of its neighbours (new = ¼·prev + ½·cur +
+ * ¼·next). The marching-squares contour is stair-stepped and the offset can
+ * leave sub-mm crinkle on tight roundings; a couple of passes over the
+ * arc-length-resampled ring irons that out so the lofted wall reads as a smooth
+ * curve instead of a faceted/jagged one. The inward pull is a fraction of the
+ * point spacing — visually negligible on the cavity.
+ */
+function smoothClosed(
+  pts: Array<[number, number]>,
+  passes: number
+): Array<[number, number]> {
+  const n = pts.length;
+  if (n < 5) return pts;
+  let cur = pts;
+  for (let pass = 0; pass < passes; pass++) {
+    const next: Array<[number, number]> = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = cur[(i - 1 + n) % n];
+      const b = cur[i];
+      const c = cur[(i + 1) % n];
+      next[i] = [
+        0.25 * a[0] + 0.5 * b[0] + 0.25 * c[0],
+        0.25 * a[1] + 0.5 * b[1] + 0.25 * c[1],
+      ];
+    }
+    cur = next;
+  }
+  return cur;
+}
+
 /** Arc-length resample a closed loop to M points, CCW, aligned by start angle. */
 function resampleAlign(
   loop: Array<[number, number]>,
@@ -740,18 +772,21 @@ function resampleAlign(
     const b = src[(i + 1) % n];
     out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
   }
+  // Smooth out marching-squares stair-steps now that points are evenly spaced,
+  // so the lofted wall is a clean curve (kills the crinkle on tight roundings).
+  const smoothed = smoothClosed(out, 2);
   // Rotate so the point nearest angle 0 (from centroid) is first → no twist.
-  const c = centroid(out);
+  const c = centroid(smoothed);
   let best = 0;
   let bestA = Infinity;
-  for (let k = 0; k < out.length; k++) {
-    const a = Math.abs(Math.atan2(out[k][1] - c[1], out[k][0] - c[0]));
+  for (let k = 0; k < smoothed.length; k++) {
+    const a = Math.abs(Math.atan2(smoothed[k][1] - c[1], smoothed[k][0] - c[0]));
     if (a < bestA) {
       bestA = a;
       best = k;
     }
   }
-  return out.slice(best).concat(out.slice(0, best));
+  return smoothed.slice(best).concat(smoothed.slice(0, best));
 }
 
 /** Close an unmatched hole loop to an apex point on the opposite face. */

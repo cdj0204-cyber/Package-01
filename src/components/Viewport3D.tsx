@@ -907,8 +907,11 @@ export function Viewport3D() {
       } catch {
         /* fall back to raw geometry */
       }
+      // 45° threshold: keeps the genuine hard edges (box corners ~90°, cavity
+      // rim ~85°) but ignores the shallow facet-to-facet seams along the smooth
+      // drafted walls, so no stray vertical lines are drawn on the rounding.
       const edges = new THREE.LineSegments(
-        creaseEdgesGeometry(welded, 30),
+        creaseEdgesGeometry(welded, 45),
         new THREE.LineBasicMaterial({ color: 0x20262e })
       );
       content.add(edges);

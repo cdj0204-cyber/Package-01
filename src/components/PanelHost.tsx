@@ -1196,12 +1196,13 @@ function Step12FoamExport() {
       <div className="btn-row">
         <button className="btn" disabled={!foam.ready} onClick={() => dl("stl")}>STL</button>
         <button className="btn" disabled={!foam.ready} onClick={() => dl("obj")}>OBJ</button>
-        <button className="btn secondary" disabled={!foam.ready} onClick={() => dl("step")}>STEP</button>
-        <button className="btn secondary" disabled={!foam.ready} onClick={() => dl("fbx")}>FBX</button>
+        <button className="btn" disabled={!foam.ready} onClick={() => dl("step")}>STEP</button>
+        <button className="btn" disabled={!foam.ready} onClick={() => dl("fbx")}>FBX</button>
       </div>
       {err && <div className="note warn">⚠ {err}</div>}
       <div className="note">
-        STL/OBJ는 즉시 출력됩니다. STEP/FBX는 B-rep 커널/FBX SDK 연동 후 지원 예정.
+        STL·OBJ·STEP·FBX 모두 즉시 출력됩니다. STEP은 패싯 솔리드(B-rep)로,
+        FBX는 ASCII 메시로 내보냅니다.
       </div>
     </div>
   );
