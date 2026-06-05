@@ -1,9 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store/useStore";
 import type { ViewportKind } from "../pipeline/steps";
 import { getArtworkPreset, getBoxPreset } from "../box/presets";
 import { generateDieline } from "../box/dieline";
-import type { Silhouette } from "../types";
+import type { LineArtLayerKind, Silhouette } from "../types";
+
+// Back-to-front draw order for the Step-7 illustration layers.
+const LAYER_Z: Record<LineArtLayerKind, number> = {
+  shaded: 0,
+  wireframe: 1,
+  edges: 2,
+  silhouette: 3,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2D canvas viewport for silhouette / artwork / dieline steps.
@@ -13,6 +21,19 @@ import type { Silhouette } from "../types";
 export function Viewport2D({ kind }: { kind: ViewportKind }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragId = useRef<string | null>(null);
+  // Cache decoded shaded-layer images; bump a version to redraw once they load.
+  const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
+  const [imgVersion, setImgVersion] = useState(0);
+  function getLoadedImg(url: string): HTMLImageElement | null {
+    let img = imgCache.current.get(url);
+    if (!img) {
+      img = new Image();
+      img.onload = () => setImgVersion((v) => v + 1);
+      img.src = url;
+      imgCache.current.set(url, img);
+    }
+    return img.complete && img.naturalWidth > 0 ? img : null;
+  }
 
   const silhouettes = useStore((s) => s.silhouettes);
   const lineArt = useStore((s) => s.lineArt);
@@ -73,33 +94,50 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
       const { fit, scale } = makeFit([0, 0], [faceW, faceH], w, h, 80);
       const o = fit(0, 0);
       const px = scale;
-      // face background
-      c.fillStyle = preset.background;
+      // face background (custom override or preset)
+      c.fillStyle = artwork.background ?? preset.background;
       c.fillRect(o[0], o[1] - faceH * px, faceW * px, faceH * px);
       c.strokeStyle = "#2a313c";
       c.strokeRect(o[0], o[1] - faceH * px, faceW * px, faceH * px);
 
-      // Product line drawing centred per artwork cfg. Prefer the Step-7 projected
-      // edge line drawing (`lineArt`); fall back to the legacy silhouette outline.
+      // Product line drawing centred per artwork cfg. Prefer the Step-7 layered
+      // line art (`lineArt`); fall back to the legacy silhouette outline.
       const cx = o[0] + artwork.x * faceW * px;
       const cy = o[1] - artwork.y * faceH * px;
       const target = Math.min(faceW, faceH) * artwork.scale;
       c.strokeStyle = preset.lineColor;
       c.lineWidth = 2;
       if (lineArt) {
-        const sw = lineArt.bbox.max[0] - lineArt.bbox.min[0] || 1;
-        const sh = lineArt.bbox.max[1] - lineArt.bbox.min[1] || 1;
-        const k = (target / Math.max(sw, sh)) * px;
-        const mx = lineArt.bbox.min[0] + sw / 2;
-        const my = lineArt.bbox.min[1] + sh / 2;
-        c.lineWidth = 1;
-        c.beginPath();
-        for (const s of lineArt.segments) {
-          // segment coords are screen-y-down; box face is y-up → negate.
-          c.moveTo(cx + (s[0][0] - mx) * k, cy + (s[0][1] - my) * k);
-          c.lineTo(cx + (s[1][0] - mx) * k, cy + (s[1][1] - my) * k);
+        const bw = lineArt.bbox.max[0] - lineArt.bbox.min[0] || 1;
+        const bh = lineArt.bbox.max[1] - lineArt.bbox.min[1] || 1;
+        const ew = bw * lineArt.aspect; // aspect-corrected extents
+        const fit = target / Math.max(ew, bh);
+        const drawW = ew * fit * px;
+        const drawH = bh * fit * px;
+        const left = cx - drawW / 2;
+        const top = cy - drawH / 2;
+        const X = (nx: number) => left + ((nx - lineArt.bbox.min[0]) / bw) * drawW;
+        const Y = (ny: number) => top + ((lineArt.bbox.max[1] - ny) / bh) * drawH; // flip y
+        const ordered = lineArt.layers
+          .filter((l) => l.enabled)
+          .sort((a, b) => LAYER_Z[a.kind] - LAYER_Z[b.kind]);
+        for (const layer of ordered) {
+          c.globalAlpha = Math.max(0, Math.min(1, layer.opacity));
+          if (layer.kind === "shaded" && layer.image) {
+            const img = getLoadedImg(layer.image);
+            if (img) c.drawImage(img, left, top, drawW, drawH);
+          } else if (layer.segments) {
+            c.strokeStyle = layer.color ?? preset.lineColor;
+            c.lineWidth = layer.kind === "silhouette" ? 2 : 1;
+            c.beginPath();
+            for (const s of layer.segments) {
+              c.moveTo(X(s[0][0]), Y(s[0][1]));
+              c.lineTo(X(s[1][0]), Y(s[1][1]));
+            }
+            c.stroke();
+          }
         }
-        c.stroke();
+        c.globalAlpha = 1;
       } else {
         const sil = silhouettes[artwork.view] ?? Object.values(silhouettes)[0];
         if (sil) {
@@ -179,7 +217,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
         h - 14
       );
     }
-  }, [kind, silhouettes, lineArt, artwork, texts, boxPresetId, boxSizing]);
+  }, [kind, silhouettes, lineArt, artwork, texts, boxPresetId, boxSizing, imgVersion]);
 
   // ── interactive text drag (artwork step) ────────────────────────────────────
   function onPointerDown(e: React.PointerEvent) {

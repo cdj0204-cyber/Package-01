@@ -5,6 +5,9 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { useStore } from "../store/useStore";
 import { lineArtBridge } from "./lineArtBridge";
+import { captureLineArt } from "./lineArtCapture";
+import { buildIllustrationCanvas } from "./compositeArtwork";
+import { getArtworkPreset } from "../box/presets";
 import type { ImportedMesh, PlacedModel } from "../types";
 import { type BoxPose } from "../geometry/boolean";
 import {
@@ -218,6 +221,7 @@ const VIEW_DIRS: Record<
 
 export function Viewport3D() {
   const mountRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer>();
   const sceneRef = useRef<THREE.Scene>();
   const contentRef = useRef<THREE.Group>();
   const modelsRootRef = useRef<THREE.Group>();
@@ -275,14 +279,20 @@ export function Viewport3D() {
   const boxPresetId = useStore((s) => s.boxPresetId);
   const boxSizing = useStore((s) => s.boxSizing);
   const boxLidSide = useStore((s) => s.boxLidSide);
+  const step7View = useStore((s) => s.step7View);
+  const lineArt = useStore((s) => s.lineArt);
+  const artwork = useStore((s) => s.artwork);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
   const cameraView = useStore((s) => s.cameraView);
 
-  // Raw product models are shown for the Step 1-2 placement work and again for
-  // Step 7 (line-drawing extraction), where the user views the product from the
-  // 7 viewpoints and rotates it before extracting its outline.
-  const showModel = step <= 2 || step === 7;
+  // Raw product models: Step 1-2 placement, and Step 7 "product" mode (viewing
+  // the product to extract its line drawing). Step 7 "box" mode shows the box
+  // with the illustration applied instead.
+  const showModel = step <= 2 || (step === 7 && step7View === "product");
+  const boxVisible =
+    (step >= 5 && step <= 10 && step !== 7) ||
+    (step === 7 && step7View === "box");
 
   // ── one-time scene setup ────────────────────────────────────────────────────
   useEffect(() => {
@@ -311,6 +321,7 @@ export function Viewport3D() {
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.localClippingEnabled = true; // Step-3 overlap preview clips to box
+    rendererRef.current = renderer;
     mount.appendChild(renderer.domElement);
 
     const orbit = new OrbitControls(camera, renderer.domElement);
@@ -725,66 +736,36 @@ export function Viewport3D() {
     frameCurrentView();
   }, [frameCurrentView]);
   useEffect(() => {
-    if (step === 7) frameCurrentView();
-  }, [step, frameCurrentView]);
+    if (step === 7 && step7View === "product") frameCurrentView();
+  }, [step, step7View, frameCurrentView]);
 
-  // Register the line-art capture for the Step-7 panel: project a model's feature
-  // edges through the CURRENT camera (perspective or any face, incl. manual
-  // orbit) into a 2D line drawing. Refs are stable, so a one-time bind is fine.
+  // Register the Step-7 line-art capture: project a model through the CURRENT
+  // camera (perspective or any face, incl. manual orbit) into FOUR stackable
+  // illustration layers — outer silhouette, shaded raster, feature edges, and
+  // mesh wireframe — all registered together so they line up. Refs are stable.
   useEffect(() => {
-    lineArtBridge.capture = (modelId: string) => {
-      const cam = activeCamRef.current;
-      const grp = modelGroupsRef.current.get(modelId);
-      const mount = mountRef.current;
-      if (!cam || !grp || !mount) return null;
-      cam.updateMatrixWorld(true);
-      cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
-      grp.pivot.updateMatrixWorld(true);
-      const aspect = (mount.clientWidth || 1) / (mount.clientHeight || 1);
-      const segs: Array<[[number, number], [number, number]]> = [];
-      const a = new THREE.Vector3();
-      const b = new THREE.Vector3();
-      grp.pivot.traverse((obj) => {
-        const mesh = obj as THREE.Mesh;
-        if (!(mesh as any).isMesh || !mesh.geometry) return;
-        // 30° feature edges → a clean technical line drawing (not every facet).
-        const eg = new THREE.EdgesGeometry(mesh.geometry, 30);
-        const pos = eg.getAttribute("position");
-        for (let i = 0; i + 1 < pos.count; i += 2) {
-          a.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).project(cam);
-          b.fromBufferAttribute(pos, i + 1).applyMatrix4(mesh.matrixWorld).project(cam);
-          segs.push([
-            [a.x * aspect, -a.y],
-            [b.x * aspect, -b.y],
-          ]);
-        }
-        eg.dispose();
-      });
-      if (!segs.length) return null;
-      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-      for (const s of segs)
-        for (const p of s) {
-          if (p[0] < minx) minx = p[0];
-          if (p[0] > maxx) maxx = p[0];
-          if (p[1] < miny) miny = p[1];
-          if (p[1] > maxy) maxy = p[1];
-        }
-      return { segments: segs, bbox: { min: [minx, miny], max: [maxx, maxy] } };
-    };
+    lineArtBridge.capture = (modelId: string) =>
+      captureLineArt(
+        modelId,
+        rendererRef.current,
+        sceneRef.current,
+        modelsRootRef.current,
+        modelGroupsRef.current.get(modelId),
+        activeCamRef.current,
+        mountRef.current
+      );
     return () => {
       lineArtBridge.capture = null;
     };
   }, []);
 
-  // ── frame the assembled box when entering a Stage B box (3D) step ────────────
-  // After the Stage B reorder these are 5 (유형), 6 (설정), 9 (렌더링); steps 7–8
-  // are 2D artwork/text in between.
-  const isBoxStep = (s: number) => s === 5 || s === 6 || s === 9;
-  const prevStepRef = useRef(1);
+  // ── frame the assembled box whenever it becomes visible (box 3D steps, and
+  // Step 7's "box" preview mode) ───────────────────────────────────────────────
+  const prevBoxVisRef = useRef(false);
   useEffect(() => {
-    const prev = prevStepRef.current;
-    prevStepRef.current = step;
-    if (!isBoxStep(step) || isBoxStep(prev) || !boxPresetId) return;
+    const wasVisible = prevBoxVisRef.current;
+    prevBoxVisRef.current = boxVisible;
+    if (!boxVisible || wasVisible || !boxPresetId) return;
     const persp = perspRef.current;
     const ortho = orthoRef.current;
     const orbit = orbitRef.current;
@@ -814,7 +795,7 @@ export function Viewport3D() {
     }
     orbit.target.copy(target);
     orbit.update();
-  }, [step, boxPresetId, models, boxSizing]);
+  }, [boxVisible, boxPresetId, models, boxSizing]);
 
   // ── reconcile model groups + apply each transform ────────────────────────────
   useEffect(() => {
@@ -989,7 +970,7 @@ export function Viewport3D() {
     disposeGroup(content);
 
     const center = combinedCenterXY(models);
-    const showBox = step >= 5 && step <= 10 && step !== 7; // step 7 shows the product
+    const showBox = boxVisible;
 
     // Step 4 / 11 — the boolean result (insert foam). Rendered as an OPAQUE
     // shaded solid with edge lines (CAD "shaded + edges" look) so the cut cavity
@@ -1105,9 +1086,41 @@ export function Viewport3D() {
         })
       );
       group.add(mesh);
+
+      // Apply the Step-7 line drawing to the box FRONT face (+Z wall) as a flat
+      // textured decal, sized by the artwork scale and placed per its x/y.
+      if (lineArt && lineArt.layers.some((l) => l.enabled)) {
+        const preset = getArtworkPreset(artwork.presetId);
+        let tex: THREE.CanvasTexture | null = null;
+        const canvas = buildIllustrationCanvas(lineArt, preset.lineColor, () => {
+          if (tex) tex.needsUpdate = true;
+        });
+        tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        const iw = (lineArt.bbox.max[0] - lineArt.bbox.min[0]) * lineArt.aspect || 1;
+        const ih = lineArt.bbox.max[1] - lineArt.bbox.min[1] || 1;
+        const sc = Math.min((bw * artwork.scale) / iw, (bh * artwork.scale) / ih);
+        const plane = new THREE.Mesh(
+          new THREE.PlaneGeometry(iw * sc, ih * sc),
+          new THREE.MeshBasicMaterial({
+            map: tex,
+            transparent: true,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          })
+        );
+        const tBoard = Math.min(6, Math.max(1.5, Math.min(bw, bd, bh) * 0.03));
+        plane.position.set(
+          (artwork.x - 0.5) * bw,
+          artwork.y * bh,
+          bd / 2 + tBoard + 0.5
+        );
+        group.add(plane);
+      }
+
       content.add(group);
     }
-  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide]);
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, lineArt, artwork]);
 
   // ── Step 3: editable box form (resize face-arrows / move / rotate) ────────────
   useEffect(() => {

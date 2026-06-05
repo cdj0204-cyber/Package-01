@@ -170,20 +170,41 @@ export interface ArtworkPreset {
   lineColor: string; // css color
 }
 
+/** The four product-illustration extraction modes, stackable as layers. */
+export type LineArtLayerKind = "silhouette" | "shaded" | "edges" | "wireframe";
+
 /**
- * Step 7 — a projected line drawing of the product: the model's feature/crease
- * edges projected from the chosen viewpoint (works for perspective too). Each
- * segment is a 2D pair in screen-proportional coords; `bbox` frames them.
+ * One illustration layer captured from the Step-7 viewpoint. Vector layers
+ * (silhouette / edges / wireframe) carry `segments` in NDC (-1..1, y up); the
+ * raster `shaded` layer carries an `image` dataURL that fills the bbox.
+ */
+export interface LineArtLayer {
+  kind: LineArtLayerKind;
+  enabled: boolean;
+  opacity: number; // 0..1
+  /** Stroke color for vector layers (hex). Falls back to a per-kind default. */
+  color?: string;
+  segments?: Array<[[number, number], [number, number]]>;
+  image?: string;
+}
+
+/**
+ * Step 7 — a layered line drawing of the product, all captured together from
+ * one viewpoint so the layers register. `bbox` (NDC) frames the product and
+ * `aspect` is the capture camera's width/height (applied when drawing).
  */
 export interface LineArt {
-  segments: Array<[[number, number], [number, number]]>;
   bbox: { min: [number, number]; max: [number, number] };
+  aspect: number;
+  layers: LineArtLayer[];
 }
 
 /** Step 9 — which projection of the product is drawn on the surface. */
 export interface ArtworkConfig {
   view: ViewName;
   presetId: string;
+  /** Custom face background color (hex); overrides the preset when set. */
+  background?: string;
   /** Placement on the chosen box face, normalized 0..1. */
   x: number;
   y: number;

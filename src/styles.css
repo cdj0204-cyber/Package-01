@@ -256,3 +256,9 @@ body { background: var(--bg); color: var(--text); overflow: hidden; }
 .warn { color: #d29922; }
 
 .nav-row { display: flex; justify-content: space-between; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+
+/* Step 8 illustration editing — CMYK colour cells + swatch rows */
+.cmyk-cell { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--text-dim); text-transform: uppercase; }
+.cmyk-cell input { font-size: 11px; padding: 2px 4px; }
+.swatch-row { background: var(--surface, #161b22); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; color: var(--text); cursor: pointer; font-size: 12px; }
+.swatch-row .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

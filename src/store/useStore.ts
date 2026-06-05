@@ -8,6 +8,8 @@ import type {
   InsertFoam,
   LidSide,
   LineArt,
+  LineArtLayer,
+  LineArtLayerKind,
   ModelSilhouette,
   ModelTransform,
   PlacedModel,
@@ -114,6 +116,9 @@ export interface AppStore extends ProjectState {
   /** Camera viewpoint: free perspective or one of the 6 orthographic faces. */
   cameraView: CameraView;
   setCameraView: (v: CameraView) => void;
+  /** Step 7 viewport: inspect the product, or preview it applied to the box. */
+  step7View: "product" | "box";
+  setStep7View: (v: "product" | "box") => void;
 
   // ── Multi-model management ───────────────────────────────────────────────────
   /** Import one or more products; the last one becomes selected. */
@@ -150,6 +155,7 @@ export interface AppStore extends ProjectState {
   setBoxPreset: (id: string) => void;
   setBoxLidSide: (side: LidSide) => void;
   setLineArt: (art: LineArt | null) => void;
+  updateLineArtLayer: (kind: LineArtLayerKind, patch: Partial<LineArtLayer>) => void;
   updateBoxSizing: (patch: Partial<BoxSizing>) => void;
   updateArtwork: (patch: Partial<ArtworkConfig>) => void;
   addText: (el: TextElement) => void;
@@ -171,6 +177,8 @@ export const useStore = create<AppStore>((set) => ({
   setGizmoMode: (gizmoMode) => set({ gizmoMode }),
   cameraView: "perspective",
   setCameraView: (cameraView) => set({ cameraView }),
+  step7View: "product",
+  setStep7View: (step7View) => set({ step7View }),
   boxTransform: null,
   setBoxTransform: (boxTransform) => set({ boxTransform }),
   boxEditMode: "resize",
@@ -319,6 +327,19 @@ export const useStore = create<AppStore>((set) => ({
   setBoxPreset: (boxPresetId) => set({ boxPresetId }),
   setBoxLidSide: (boxLidSide) => set({ boxLidSide }),
   setLineArt: (lineArt) => set({ lineArt }),
+  updateLineArtLayer: (kind, patch) =>
+    set((s) =>
+      s.lineArt
+        ? {
+            lineArt: {
+              ...s.lineArt,
+              layers: s.lineArt.layers.map((l) =>
+                l.kind === kind ? { ...l, ...patch } : l
+              ),
+            },
+          }
+        : {}
+    ),
 
   updateBoxSizing: (patch) =>
     set((s) => ({ boxSizing: { ...s.boxSizing, ...patch } })),

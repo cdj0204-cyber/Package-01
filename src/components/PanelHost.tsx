@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { useStore, type CameraView } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
-import { VIEW_NAMES, type ViewName, type ModelSilhouette, type LidSide, type LineArt } from "../types";
+import { VIEW_NAMES, type ViewName, type ModelSilhouette, type LidSide, type LineArt, type LineArtLayerKind } from "../types";
 import { lineArtBridge } from "./lineArtBridge";
+import { ColorPicker } from "./ColorPicker";
 import { importStepFile } from "../geometry/stepImport";
 import {
   buildBoxLocalMesh,
@@ -21,7 +22,7 @@ import {
   type AlignAxis,
   type AlignPick,
 } from "../geometry/align";
-import { BOX_PRESETS, ARTWORK_PRESETS, getBoxPreset } from "../box/presets";
+import { BOX_PRESETS, ARTWORK_PRESETS, getBoxPreset, getArtworkPreset } from "../box/presets";
 import { generateDieline } from "../box/dieline";
 import { exportDieline, type VectorFormat } from "../box/dielineExport";
 
@@ -70,7 +71,7 @@ function StepBody({ step }: { step: number }) {
     case 5: return <Step6BoxType />;
     case 6: return <Step7Sizing />;
     case 7: return <Step9Artwork />;
-    case 8: return <Step10Text />;
+    case 8: return <Step8IllustrationEdit />;
     case 9: return <Step8Render />;
     case 10: return <Step11Dieline />;
     case 11: return <Step12FoamExport />;
@@ -1081,32 +1082,71 @@ const VIEW_BUTTONS: Array<{ id: CameraView; label: string }> = [
   { id: "bottom", label: "아랫면 (Bottom)" },
 ];
 
-// Map a camera viewpoint to the orthographic silhouette plane the outline is
-// Small SVG preview of the extracted line drawing (projected feature edges).
+// Display order + labels + draw color/z-order for the four illustration layers.
+const LAYER_META: Record<
+  LineArtLayerKind,
+  { label: string; color: string; z: number }
+> = {
+  silhouette: { label: "외곽 실루엣 라인", color: "#ffd33d", z: 3 },
+  shaded: { label: "음영 렌더링", color: "#9aa3ad", z: 0 },
+  edges: { label: "라인 드로잉 (엣지)", color: "#f0883e", z: 2 },
+  wireframe: { label: "라인 드로잉 (와이어프레임)", color: "#7d93ab", z: 1 },
+};
+const LAYER_ORDER: LineArtLayerKind[] = ["silhouette", "shaded", "edges", "wireframe"];
+
+// Layered preview (SVG): raster <image> for shaded, <path> for vector layers,
+// each with its own opacity, drawn back-to-front by z-order.
 function LineArtPreview({ art }: { art: LineArt }) {
-  const w = art.bbox.max[0] - art.bbox.min[0] || 1;
-  const h = art.bbox.max[1] - art.bbox.min[1] || 1;
-  const VW = 220, VH = 150, pad = 8;
-  const k = Math.min((VW - pad * 2) / w, (VH - pad * 2) / h);
-  const ox = (VW - w * k) / 2;
-  const oy = (VH - h * k) / 2;
-  const tx = (x: number) => (ox + (x - art.bbox.min[0]) * k).toFixed(1);
-  const ty = (y: number) => (oy + (y - art.bbox.min[1]) * k).toFixed(1);
-  // One <path> with all segments → light even for thousands of edges.
-  const d = art.segments
-    .map((s) => `M${tx(s[0][0])} ${ty(s[0][1])}L${tx(s[1][0])} ${ty(s[1][1])}`)
-    .join("");
+  const bw = (art.bbox.max[0] - art.bbox.min[0]) || 1;
+  const bh = (art.bbox.max[1] - art.bbox.min[1]) || 1;
+  const w = bw * art.aspect;
+  const VW = 230, VH = 170, pad = 8;
+  const k = Math.min((VW - pad * 2) / w, (VH - pad * 2) / bh);
+  const dw = w * k, dh = bh * k;
+  const ox = (VW - dw) / 2, oy = (VH - dh) / 2;
+  const X = (nx: number) => ox + ((nx - art.bbox.min[0]) / bw) * dw;
+  const Y = (ny: number) => oy + ((art.bbox.max[1] - ny) / bh) * dh; // flip y
+  const ordered = art.layers
+    .filter((l) => l.enabled)
+    .sort((a, b) => LAYER_META[a.kind].z - LAYER_META[b.kind].z);
   return (
     <div style={{ marginTop: 10 }}>
-      <div className="list-head" style={{ marginBottom: 6 }}>
-        추출된 라인 드로잉 ({art.segments.length} 엣지)
-      </div>
+      <div className="list-head" style={{ marginBottom: 6 }}>미리보기</div>
       <svg
         width="100%"
         viewBox={`0 0 ${VW} ${VH}`}
         style={{ background: "#0d1117", border: "1px solid var(--border)", borderRadius: 4 }}
       >
-        <path d={d} fill="none" stroke="#f0883e" strokeWidth={0.8} />
+        {ordered.map((layer) => {
+          if (layer.kind === "shaded") {
+            return layer.image ? (
+              <image
+                key="shaded"
+                href={layer.image}
+                x={ox}
+                y={oy}
+                width={dw}
+                height={dh}
+                opacity={layer.opacity}
+                preserveAspectRatio="none"
+              />
+            ) : null;
+          }
+          if (!layer.segments) return null;
+          const d = layer.segments
+            .map((s) => `M${X(s[0][0]).toFixed(1)} ${Y(s[0][1]).toFixed(1)}L${X(s[1][0]).toFixed(1)} ${Y(s[1][1]).toFixed(1)}`)
+            .join("");
+          return (
+            <path
+              key={layer.kind}
+              d={d}
+              fill="none"
+              stroke={layer.color ?? LAYER_META[layer.kind].color}
+              strokeWidth={layer.kind === "silhouette" ? 1.6 : 0.7}
+              opacity={layer.opacity}
+            />
+          );
+        })}
       </svg>
     </div>
   );
@@ -1120,13 +1160,16 @@ function Step9Artwork() {
   const setCameraView = useStore((s) => s.setCameraView);
   const lineArt = useStore((s) => s.lineArt);
   const setLineArt = useStore((s) => s.setLineArt);
-  const artwork = useStore((s) => s.artwork);
-  const update = useStore((s) => s.updateArtwork);
+  const updateLayer = useStore((s) => s.updateLineArtLayer);
+  const step7View = useStore((s) => s.step7View);
+  const setStep7View = useStore((s) => s.setStep7View);
+  const boxPresetId = useStore((s) => s.boxPresetId);
 
   const targetId = selectedModelId ?? models[0]?.id ?? null;
+  const anyLayerOn = !!lineArt && lineArt.layers.some((l) => l.enabled);
 
-  // Extract the product's feature edges projected through the CURRENT camera
-  // (any of the 7 viewpoints, perspective included) → a 2D line drawing.
+  // Capture all four illustration layers from the CURRENT viewpoint at once so
+  // they register; the user then toggles which to show and at what opacity.
   function generate() {
     if (!targetId) return;
     if (selectedModelId !== targetId) selectModel(targetId);
@@ -1137,13 +1180,39 @@ function Step9Artwork() {
     return <div className="note warn">먼저 Step 1에서 제품(STEP)을 불러오세요.</div>;
   }
 
+  const layerByKind = (k: LineArtLayerKind) =>
+    lineArt?.layers.find((l) => l.kind === k);
+
   return (
     <div>
       <p className="hint">
-        제품을 7개 시점에서 살펴보고, 개체를 회전시켜 원하는 각도를 잡은 뒤 현재
-        화면에 보이는 그대로 엣지 라인(특징 모서리)을 추출해 라인 드로잉을
-        생성합니다. 투시 시점에서도 동작합니다.
+        제품을 7개 시점에서 살펴보고, 개체를 회전시켜 각도를 잡은 뒤 현재 화면 기준
+        4가지 일러스트를 한 번에 추출합니다. 추출 후 각 레이어의 표시 여부와
+        투명도를 조절해 겹쳐 쌓고, 박스에 적용한 모습을 미리볼 수 있습니다.
       </p>
+
+      <div className="seg-row" style={{ marginBottom: 10 }}>
+        <button
+          className={"seg-btn" + (step7View === "product" ? " on" : "")}
+          onClick={() => setStep7View("product")}
+        >
+          제품 보기 (추출)
+        </button>
+        <button
+          className={"seg-btn" + (step7View === "box" ? " on" : "")}
+          disabled={!anyLayerOn || !boxPresetId}
+          onClick={() => setStep7View("box")}
+          title={
+            !boxPresetId
+              ? "먼저 박스 유형을 선택하세요"
+              : !anyLayerOn
+              ? "먼저 일러스트를 추출/표시하세요"
+              : "박스 앞면에 적용한 3D 미리보기"
+          }
+        >
+          박스에 적용
+        </button>
+      </div>
 
       <div className="list-head" style={{ marginBottom: 6 }}>시점 선택 (7)</div>
       <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
@@ -1183,29 +1252,176 @@ function Step9Artwork() {
         disabled={!targetId}
         onClick={generate}
       >
-        현재 시점에서 엣지 라인 추출 → 라인 드로잉 생성
+        현재 시점에서 일러스트 4종 추출
       </button>
 
-      {lineArt && <LineArtPreview art={lineArt} />}
-
-      <div className="list-head" style={{ margin: "14px 0 6px" }}>라인 드로잉 스타일</div>
-      {ARTWORK_PRESETS.map((p) => (
-        <div
-          key={p.id}
-          className={"preset-card" + (artwork.presetId === p.id ? " sel" : "")}
-          onClick={() => update({ presetId: p.id })}
-        >
-          <div className="name">{p.name}</div>
-          <div className="desc" style={{ display: "flex", gap: 6, marginTop: 6 }}>
-            <span style={{ width: 16, height: 16, background: p.background, border: "1px solid #2a313c", display: "inline-block" }} />
-            <span style={{ width: 16, height: 16, background: p.lineColor, border: "1px solid #2a313c", display: "inline-block" }} />
+      {lineArt && (
+        <>
+          <LineArtPreview art={lineArt} />
+          <div className="list-head" style={{ margin: "12px 0 6px" }}>표시할 레이어</div>
+          {LAYER_ORDER.map((kind) => {
+            const layer = layerByKind(kind);
+            if (!layer) return null;
+            return (
+              <label
+                key={kind}
+                className="field"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  borderLeft: `3px solid ${layer.color ?? LAYER_META[kind].color}`,
+                  paddingLeft: 8,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={layer.enabled}
+                  onChange={(e) => updateLayer(kind, { enabled: e.target.checked })}
+                />
+                {LAYER_META[kind].label}
+              </label>
+            );
+          })}
+          <div className="note" style={{ marginTop: 6 }}>
+            색상·투명도·배경·스타일은 다음 단계(일러스트 편집)에서 조절합니다.
           </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Step 8 — illustration editing (colours, opacity, background, style) ─────────
+function Step8IllustrationEdit() {
+  const lineArt = useStore((s) => s.lineArt);
+  const updateLayer = useStore((s) => s.updateLineArtLayer);
+  const artwork = useStore((s) => s.artwork);
+  const update = useStore((s) => s.updateArtwork);
+  const [open, setOpen] = useState<string | null>(null); // which colour picker is open
+
+  if (!lineArt) {
+    return (
+      <div className="note warn">
+        먼저 Step 7에서 일러스트를 추출하세요.
+      </div>
+    );
+  }
+  const preset = getArtworkPreset(artwork.presetId);
+  const bg = artwork.background ?? preset.background;
+  const toggle = (k: string) => setOpen((cur) => (cur === k ? null : k));
+
+  return (
+    <div>
+      <p className="hint">
+        추출한 일러스트를 편집합니다. 레이어별 색상(CMYK)·투명도·겹치기 순서와 배경
+        색을 조절하고, 스타일 프리셋으로 빠르게 시작할 수 있습니다.
+      </p>
+
+      <LineArtPreview art={lineArt} />
+
+      <div className="list-head" style={{ margin: "12px 0 6px" }}>스타일 프리셋</div>
+      <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
+        {ARTWORK_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            className={"seg-btn" + (artwork.presetId === p.id ? " on" : "")}
+            onClick={() => update({ presetId: p.id, background: undefined })}
+            title={p.name}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+
+      <div className="list-head" style={{ margin: "14px 0 6px" }}>배경 색 (CMYK)</div>
+      <button
+        className="swatch-row"
+        onClick={() => toggle("bg")}
+        style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}
+      >
+        <span style={{ width: 22, height: 22, borderRadius: 4, background: bg, border: "1px solid #2a313c" }} />
+        <span className="grow" style={{ textAlign: "left" }}>{bg}</span>
+        <span>{open === "bg" ? "▴" : "▾"}</span>
+      </button>
+      {open === "bg" && (
+        <div style={{ marginTop: 6 }}>
+          <ColorPicker value={bg} onChange={(hex) => update({ background: hex })} />
         </div>
-      ))}
+      )}
+
+      <div className="list-head" style={{ margin: "14px 0 6px" }}>
+        레이어 — 색·투명도·겹치기
+      </div>
+      {LAYER_ORDER.map((kind) => {
+        const layer = lineArt.layers.find((l) => l.kind === kind);
+        if (!layer) return null;
+        const col = layer.color ?? LAYER_META[kind].color;
+        const isRaster = kind === "shaded";
+        return (
+          <div
+            key={kind}
+            className="field"
+            style={{ borderLeft: `3px solid ${col}`, paddingLeft: 8 }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={layer.enabled}
+                onChange={(e) => updateLayer(kind, { enabled: e.target.checked })}
+              />
+              <span className="grow">{LAYER_META[kind].label}</span>
+              {!isRaster && (
+                <button
+                  onClick={() => toggle(kind)}
+                  title="레이어 색상 (CMYK)"
+                  style={{ width: 20, height: 20, borderRadius: 4, background: col, border: "1px solid #2a313c", cursor: "pointer" }}
+                />
+              )}
+            </div>
+            {open === kind && !isRaster && (
+              <div style={{ margin: "6px 0" }}>
+                <ColorPicker value={col} onChange={(hex) => updateLayer(kind, { color: hex })} />
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={layer.opacity}
+                disabled={!layer.enabled}
+                onChange={(e) => updateLayer(kind, { opacity: Number(e.target.value) })}
+                style={{ flex: 1 }}
+              />
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={Math.round(layer.opacity * 100)}
+                disabled={!layer.enabled}
+                onChange={(e) =>
+                  updateLayer(kind, { opacity: Math.max(0, Math.min(100, Number(e.target.value))) / 100 })
+                }
+                style={{ width: 56 }}
+              />
+            </div>
+          </div>
+        );
+      })}
+
       <div className="field" style={{ marginTop: 12 }}>
-        <label>크기 (페이스 대비 {(artwork.scale * 100).toFixed(0)}%)</label>
-        <input type="range" min={0.1} max={1} step={0.05} value={artwork.scale}
-          onChange={(e) => update({ scale: Number(e.target.value) })} style={{ width: "100%" }} />
+        <label>박스 적용 크기 (페이스 대비 {(artwork.scale * 100).toFixed(0)}%)</label>
+        <input
+          type="range"
+          min={0.1}
+          max={1}
+          step={0.02}
+          value={artwork.scale}
+          onChange={(e) => update({ scale: Number(e.target.value) })}
+          style={{ width: "100%" }}
+        />
       </div>
     </div>
   );
