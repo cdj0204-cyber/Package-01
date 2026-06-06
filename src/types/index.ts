@@ -142,6 +142,11 @@ export interface BoxPreset {
 /** Which box edges the G-type lid assembly hinges on. */
 export type LidSide = "width" | "depth";
 
+/** The box body faces a saved illustration can be applied to (Step 8). */
+export type BoxFace = "front" | "back" | "left" | "right" | "top" | "tuck";
+
+export const BOX_FACES: BoxFace[] = ["front", "back", "left", "right", "top", "tuck"];
+
 export type DielineKind =
   | "g-type"
   | "tuck-end-rte"
@@ -186,6 +191,19 @@ export interface LineArtLayer {
   color?: string;
   segments?: Array<[[number, number], [number, number]]>;
   image?: string;
+  /**
+   * Shaded-layer relight inputs, captured alongside the line art so brightness /
+   * contrast / light direction can be re-applied in 2D without the 3D scene.
+   * `albedoImage` is a flat (unlit) colour render; `normalImage` encodes the
+   * view-space surface normal (rgb = n·0.5+0.5). Both crop to the same bbox.
+   */
+  albedoImage?: string;
+  normalImage?: string;
+  /** Shaded-layer adjustments (defaults: brightness/contrast 1, light up-right). */
+  brightness?: number; // 1 = neutral
+  contrast?: number; // 1 = neutral
+  lightX?: number; // -1..1, screen right
+  lightY?: number; // -1..1, screen up
 }
 
 /**
@@ -197,6 +215,25 @@ export interface LineArt {
   bbox: { min: [number, number]; max: [number, number] };
   aspect: number;
   layers: LineArtLayer[];
+}
+
+/**
+ * A finished illustration the user saved in Step 7. Self-contained so it can be
+ * re-composited or applied to the box in a later step: it carries a full copy of
+ * the `lineArt` snapshot plus the face background at save time, and a PNG
+ * thumbnail (with background) for the list.
+ */
+export interface SavedIllustration {
+  id: string;
+  name: string;
+  /** Composited PNG thumbnail (dataURL, includes the background). */
+  thumbnail: string;
+  /** Deep copy of the line art at save time (layers, colours, shading, images). */
+  lineArt: LineArt;
+  /** Face background colour at save time (hex/css). */
+  background: string;
+  /** Viewpoint label it was captured from (for the list). */
+  view: string;
 }
 
 /** Step 9 — which projection of the product is drawn on the surface. */
@@ -249,6 +286,10 @@ export interface ProjectState {
   boxLidSide: LidSide;
   /** Step 7 — the extracted product line drawing (projected edges), or null. */
   lineArt: LineArt | null;
+  /** Step 7 — illustrations saved to a list, applied to the box in a later step. */
+  savedIllustrations: SavedIllustration[];
+  /** Step 8 — which saved illustration (id) is applied to each box face. */
+  boxFaceArtwork: Partial<Record<BoxFace, string>>;
   artwork: ArtworkConfig;
   textElements: TextElement[];
 }

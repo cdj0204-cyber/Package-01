@@ -22,11 +22,10 @@ export const STEPS: StepDef[] = [
   { id: 4, title: "인서트 폼 제작 확인", short: "인서트", stage: "A", viewport: "3d" },
   { id: 5, title: "패키지 박스 유형 선택", short: "박스유형", stage: "B", viewport: "3d" },
   { id: 6, title: "박스 크기/공차 설정", short: "박스설정", stage: "B", viewport: "3d" },
-  { id: 7, title: "일러스트 추출", short: "일러스트추출", stage: "B", viewport: "3d" },
-  { id: 8, title: "일러스트 편집", short: "일러스트편집", stage: "B", viewport: "2d-artwork" },
-  { id: 9, title: "박스 렌더링 확인", short: "렌더링", stage: "B", viewport: "3d" },
-  { id: 10, title: "도면 데이터 다운로드 (AI/DXF/SVG)", short: "도면출력", stage: "B", viewport: "2d-dieline" },
-  { id: 11, title: "인서트 폼 다운로드 (STL/STEP/FBX/OBJ)", short: "폼출력", stage: "A", viewport: "3d" },
+  { id: 7, title: "일러스트 추출·편집", short: "일러스트", stage: "B", viewport: "3d" },
+  { id: 8, title: "박스 렌더링 확인", short: "렌더링", stage: "B", viewport: "3d" },
+  { id: 9, title: "도면 데이터 다운로드 (AI/DXF/SVG)", short: "도면출력", stage: "B", viewport: "2d-dieline" },
+  { id: 10, title: "인서트 폼 다운로드 (STL/STEP/FBX/OBJ)", short: "폼출력", stage: "A", viewport: "3d" },
 ];
 
 export function getStep(id: number): StepDef {

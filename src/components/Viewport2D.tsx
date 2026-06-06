@@ -4,6 +4,7 @@ import type { ViewportKind } from "../pipeline/steps";
 import { getArtworkPreset, getBoxPreset } from "../box/presets";
 import { generateDieline } from "../box/dieline";
 import type { LineArtLayerKind, Silhouette } from "../types";
+import { getRelitShaded } from "./relightShaded";
 
 // Back-to-front draw order for the Step-7 illustration layers.
 const LAYER_Z: Record<LineArtLayerKind, number> = {
@@ -21,19 +22,8 @@ const LAYER_Z: Record<LineArtLayerKind, number> = {
 export function Viewport2D({ kind }: { kind: ViewportKind }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragId = useRef<string | null>(null);
-  // Cache decoded shaded-layer images; bump a version to redraw once they load.
-  const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Bump a version to redraw once async shaded-layer assets finish decoding.
   const [imgVersion, setImgVersion] = useState(0);
-  function getLoadedImg(url: string): HTMLImageElement | null {
-    let img = imgCache.current.get(url);
-    if (!img) {
-      img = new Image();
-      img.onload = () => setImgVersion((v) => v + 1);
-      img.src = url;
-      imgCache.current.set(url, img);
-    }
-    return img.complete && img.naturalWidth > 0 ? img : null;
-  }
 
   const silhouettes = useStore((s) => s.silhouettes);
   const lineArt = useStore((s) => s.lineArt);
@@ -123,9 +113,9 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
           .sort((a, b) => LAYER_Z[a.kind] - LAYER_Z[b.kind]);
         for (const layer of ordered) {
           c.globalAlpha = Math.max(0, Math.min(1, layer.opacity));
-          if (layer.kind === "shaded" && layer.image) {
-            const img = getLoadedImg(layer.image);
-            if (img) c.drawImage(img, left, top, drawW, drawH);
+          if (layer.kind === "shaded") {
+            const src = getRelitShaded(layer, () => setImgVersion((v) => v + 1));
+            if (src) c.drawImage(src, left, top, drawW, drawH);
           } else if (layer.segments) {
             c.strokeStyle = layer.color ?? preset.lineColor;
             c.lineWidth = layer.kind === "silhouette" ? 2 : 1;

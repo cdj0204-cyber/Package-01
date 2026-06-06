@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore, type CameraView } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
-import { VIEW_NAMES, type ViewName, type ModelSilhouette, type LidSide, type LineArt, type LineArtLayerKind } from "../types";
+import { VIEW_NAMES, type BoxFace, type ViewName, type ModelSilhouette, type LidSide, type LineArt, type LineArtLayerKind } from "../types";
 import { lineArtBridge } from "./lineArtBridge";
 import { ColorPicker } from "./ColorPicker";
+import { drawIllustration, composeIllustration } from "./illustrationRender";
 import { importStepFile } from "../geometry/stepImport";
 import {
   buildBoxLocalMesh,
@@ -70,11 +71,10 @@ function StepBody({ step }: { step: number }) {
     case 4: return <Step5Insert />;
     case 5: return <Step6BoxType />;
     case 6: return <Step7Sizing />;
-    case 7: return <Step9Artwork />;
-    case 8: return <Step8IllustrationEdit />;
-    case 9: return <Step8Render />;
-    case 10: return <Step11Dieline />;
-    case 11: return <Step12FoamExport />;
+    case 7: return <Step7Illustration />;
+    case 8: return <Step8Render />;
+    case 9: return <Step11Dieline />;
+    case 10: return <Step12FoamExport />;
     default: return null;
   }
 }
@@ -1051,37 +1051,130 @@ function Step7Sizing() {
   );
 }
 
-// ── Step 8 ────────────────────────────────────────────────────────────────────
+// ── Step 8 — render & apply saved illustrations to box faces ────────────────────
+const FACE_META: Array<{ key: BoxFace; label: string; view: CameraView; lidOnly?: boolean }> = [
+  { key: "front", label: "정면", view: "front" },
+  { key: "back", label: "후면", view: "rear" },
+  { key: "right", label: "우측", view: "right" },
+  { key: "left", label: "좌측", view: "left" },
+  { key: "top", label: "윗면", view: "top" },
+  { key: "tuck", label: "앞 덮개", view: "front", lidOnly: true },
+];
+
 function Step8Render() {
-  const sizing = useStore((s) => s.boxSizing);
   const presetId = useStore((s) => s.boxPresetId);
+  const saved = useStore((s) => s.savedIllustrations);
+  const faceArt = useStore((s) => s.boxFaceArtwork);
+  const setFaceArt = useStore((s) => s.setBoxFaceArtwork);
+  const setCameraView = useStore((s) => s.setCameraView);
+  const boxClosed = useStore((s) => s.boxClosed);
+  const setBoxClosed = useStore((s) => s.setBoxClosed);
+  const [selFace, setSelFace] = useState<BoxFace>("front");
+
+  if (!presetId) {
+    return <div className="note warn">박스 유형을 먼저 선택하세요 (Step 5).</div>;
+  }
+
+  const hasLid = getBoxPreset(presetId)?.dielineKind === "g-type";
+  const faces = FACE_META.filter((f) => hasLid || !f.lidOnly);
+  const selMeta = FACE_META.find((f) => f.key === selFace)!;
+  const assigned = faceArt[selFace];
+  const pickFace = (f: (typeof FACE_META)[number]) => {
+    setSelFace(f.key);
+    setCameraView(f.view);
+  };
+
   return (
     <div>
       <p className="hint">
-        설정된 볼륨값으로 박스를 3D로 렌더링해 확인합니다. 좌측 뷰에서 회전/줌으로
-        살펴보세요.
+        박스 면을 선택하고, Step 7에서 저장한 일러스트를 적용합니다. 면을 고르면
+        좌측 3D 뷰가 해당 면을 바라봅니다.
       </p>
-      <div className="note" style={{ color: "var(--text-dim)" }}>
-        유형: {presetId ?? "(미선택)"}<br />
-        볼륨: {sizing.width} × {sizing.depth} × {sizing.height} mm
+
+      {hasLid && (
+        <>
+          <div className="list-head" style={{ marginBottom: 6 }}>뚜껑 상태</div>
+          <div className="seg-row" style={{ marginBottom: 12 }}>
+            <button
+              className={"seg-btn" + (!boxClosed ? " on" : "")}
+              onClick={() => setBoxClosed(false)}
+            >
+              열린 모습
+            </button>
+            <button
+              className={"seg-btn" + (boxClosed ? " on" : "")}
+              onClick={() => setBoxClosed(true)}
+            >
+              닫힌 모습
+            </button>
+          </div>
+        </>
+      )}
+
+      <div className="list-head" style={{ marginBottom: 6 }}>면 선택</div>
+      <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
+        {faces.map((f) => (
+          <button
+            key={f.key}
+            className={"seg-btn" + (selFace === f.key ? " on" : "")}
+            onClick={() => pickFace(f)}
+            title={faceArt[f.key] ? "적용됨" : "비어 있음"}
+          >
+            {f.label}
+            {faceArt[f.key] ? " ●" : ""}
+          </button>
+        ))}
       </div>
-      {!presetId && <div className="note warn">박스 유형을 먼저 선택하세요 (Step 5).</div>}
+
+      <div className="list-head" style={{ margin: "14px 0 6px" }}>
+        ‘{selMeta.label}’ 면에 적용할 일러스트
+      </div>
+      {!saved.length ? (
+        <div className="note warn">
+          저장된 일러스트가 없습니다. Step 7에서 먼저 렌더링을 저장하세요.
+        </div>
+      ) : (
+        <div className="ill-grid">
+          <button
+            className={"ill-cell" + (!assigned ? " on" : "")}
+            onClick={() => setFaceArt(selFace, null)}
+          >
+            <span className="ill-none">비우기</span>
+          </button>
+          {saved.map((item) => (
+            <button
+              key={item.id}
+              className={"ill-cell" + (assigned === item.id ? " on" : "")}
+              onClick={() => setFaceArt(selFace, item.id)}
+              title={`${item.name} · ${item.view} 뷰`}
+            >
+              <img src={item.thumbnail} alt={item.name} />
+              <span className="ill-name">{item.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="list-head" style={{ margin: "16px 0 6px" }}>면별 적용 현황</div>
+      <div className="face-summary">
+        {faces.map((f) => {
+          const it = saved.find((s) => s.id === faceArt[f.key]);
+          return (
+            <div className="face-row" key={f.key}>
+              <span className="grow">{f.label}</span>
+              <span style={{ color: it ? "var(--text)" : "var(--text-dim)" }}>
+                {it ? it.name : "—"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// ── Step 9 ────────────────────────────────────────────────────────────────────
-// The 7 viewpoints offered for inspecting the product before extraction.
-const VIEW_BUTTONS: Array<{ id: CameraView; label: string }> = [
-  { id: "perspective", label: "투시 (3D)" },
-  { id: "front", label: "정면 (Front)" },
-  { id: "rear", label: "후면 (Rear)" },
-  { id: "right", label: "우측 (Right)" },
-  { id: "left", label: "좌측 (Left)" },
-  { id: "top", label: "윗면 (Top)" },
-  { id: "bottom", label: "아랫면 (Bottom)" },
-];
-
+// ── Step 7 — illustration (extract + edit, merged) ─────────────────────────────
+// (Viewpoint switching now lives in the 3D viewport's "뷰포트 시점" menu.)
 // Display order + labels + draw color/z-order for the four illustration layers.
 const LAYER_META: Record<
   LineArtLayerKind,
@@ -1152,24 +1245,28 @@ function LineArtPreview({ art }: { art: LineArt }) {
   );
 }
 
-function Step9Artwork() {
+// ── Step 7 — illustration split workspace (3D viewport ‖ live preview) ──────────
+// Left-column options drive the 3D VIEWPORT (which product, viewpoint, placement,
+// extraction). Used by App's two-pane Step-7 layout and the stacked fallback.
+export function Step7LeftOptions() {
   const models = useStore((s) => s.models);
   const selectedModelId = useStore((s) => s.selectedModelId);
   const selectModel = useStore((s) => s.selectModel);
-  const cameraView = useStore((s) => s.cameraView);
-  const setCameraView = useStore((s) => s.setCameraView);
-  const lineArt = useStore((s) => s.lineArt);
   const setLineArt = useStore((s) => s.setLineArt);
-  const updateLayer = useStore((s) => s.updateLineArtLayer);
-  const step7View = useStore((s) => s.step7View);
   const setStep7View = useStore((s) => s.setStep7View);
-  const boxPresetId = useStore((s) => s.boxPresetId);
 
   const targetId = selectedModelId ?? models[0]?.id ?? null;
-  const anyLayerOn = !!lineArt && lineArt.layers.some((l) => l.enabled);
 
-  // Capture all four illustration layers from the CURRENT viewpoint at once so
-  // they register; the user then toggles which to show and at what opacity.
+  // Step 7 only views the product (for extraction); keep the viewport in product
+  // mode and auto-select a model so the gizmo + numeric controls are live.
+  useEffect(() => {
+    setStep7View("product");
+  }, [setStep7View]);
+  useEffect(() => {
+    if (!selectedModelId && models.length) selectModel(models[0].id);
+  }, [selectedModelId, models, selectModel]);
+
+  // Capture all four illustration layers from the CURRENT viewpoint at once.
   function generate() {
     if (!targetId) return;
     if (selectedModelId !== targetId) selectModel(targetId);
@@ -1180,254 +1277,498 @@ function Step9Artwork() {
     return <div className="note warn">먼저 Step 1에서 제품(STEP)을 불러오세요.</div>;
   }
 
-  const layerByKind = (k: LineArtLayerKind) =>
-    lineArt?.layers.find((l) => l.kind === k);
-
   return (
     <div>
-      <p className="hint">
-        제품을 7개 시점에서 살펴보고, 개체를 회전시켜 각도를 잡은 뒤 현재 화면 기준
-        4가지 일러스트를 한 번에 추출합니다. 추출 후 각 레이어의 표시 여부와
-        투명도를 조절해 겹쳐 쌓고, 박스에 적용한 모습을 미리볼 수 있습니다.
-      </p>
-
-      <div className="seg-row" style={{ marginBottom: 10 }}>
-        <button
-          className={"seg-btn" + (step7View === "product" ? " on" : "")}
-          onClick={() => setStep7View("product")}
-        >
-          제품 보기 (추출)
-        </button>
-        <button
-          className={"seg-btn" + (step7View === "box" ? " on" : "")}
-          disabled={!anyLayerOn || !boxPresetId}
-          onClick={() => setStep7View("box")}
-          title={
-            !boxPresetId
-              ? "먼저 박스 유형을 선택하세요"
-              : !anyLayerOn
-              ? "먼저 일러스트를 추출/표시하세요"
-              : "박스 앞면에 적용한 3D 미리보기"
-          }
-        >
-          박스에 적용
-        </button>
+      <div className="list-head" style={{ marginBottom: 8 }}>
+        ① 3D 뷰포트 — 제품 · 시점 · 위치
       </div>
 
-      <div className="list-head" style={{ marginBottom: 6 }}>시점 선택 (7)</div>
-      <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
-        {VIEW_BUTTONS.map((v) => (
-          <button
-            key={v.id}
-            className={"seg-btn" + (cameraView === v.id ? " on" : "")}
-            onClick={() => setCameraView(v.id)}
-          >
-            {v.label}
-          </button>
-        ))}
-      </div>
-
-      {models.length > 1 && (
-        <div className="model-list">
-          <div className="list-head">대상 제품 선택</div>
+      <div className="field">
+        <label>대상 제품</label>
+        <select
+          value={targetId ?? ""}
+          onChange={(e) => selectModel(e.target.value)}
+          style={{ width: "100%" }}
+        >
           {models.map((m) => (
-            <div
-              key={m.id}
-              className={"model-item" + (m.id === targetId ? " sel" : "")}
-              onClick={() => selectModel(m.id)}
-            >
-              <div className="grow">
-                <div className="name">{m.name}</div>
-              </div>
-            </div>
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
           ))}
-        </div>
-      )}
-
+        </select>
+      </div>
+      <div className="note" style={{ color: "var(--text-dim)" }}>
+        시점 변경은 뷰포트 상단 <b>뷰포트 시점</b> 메뉴에서, 위치·회전은 아래 수치값
+        또는 뷰포트 검볼(이동/회전)로 조절합니다.
+      </div>
       <PlacementEditor />
-
       <button
         className="btn block"
         style={{ marginTop: 12 }}
         disabled={!targetId}
         onClick={generate}
       >
-        현재 시점에서 일러스트 4종 추출
+        현재 시점에서 일러스트 추출
       </button>
-
-      {lineArt && (
-        <>
-          <LineArtPreview art={lineArt} />
-          <div className="list-head" style={{ margin: "12px 0 6px" }}>표시할 레이어</div>
-          {LAYER_ORDER.map((kind) => {
-            const layer = layerByKind(kind);
-            if (!layer) return null;
-            return (
-              <label
-                key={kind}
-                className="field"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  borderLeft: `3px solid ${layer.color ?? LAYER_META[kind].color}`,
-                  paddingLeft: 8,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={layer.enabled}
-                  onChange={(e) => updateLayer(kind, { enabled: e.target.checked })}
-                />
-                {LAYER_META[kind].label}
-              </label>
-            );
-          })}
-          <div className="note" style={{ marginTop: 6 }}>
-            색상·투명도·배경·스타일은 다음 단계(일러스트 편집)에서 조절합니다.
-          </div>
-        </>
-      )}
     </div>
   );
 }
 
-// ── Step 8 — illustration editing (colours, opacity, background, style) ─────────
-function Step8IllustrationEdit() {
+// Large illustration preview canvas — fills its container, drawing the artwork
+// background, the relit shaded raster, and the vector layers (colour/opacity).
+export function IllustrationPreview() {
+  const lineArt = useStore((s) => s.lineArt);
+  const artwork = useStore((s) => s.artwork);
+  const ref = useRef<HTMLCanvasElement>(null);
+  const [ver, setVer] = useState(0);
+
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const parent = cv.parentElement!;
+    const draw = () => {
+      const W = (cv.width = parent.clientWidth);
+      const H = (cv.height = parent.clientHeight);
+      const ctx = cv.getContext("2d");
+      if (!ctx) return;
+      const preset = getArtworkPreset(artwork.presetId);
+      const bg = artwork.background ?? preset.background;
+      const drew = drawIllustration(ctx, W, H, lineArt, bg, () => setVer((v) => v + 1));
+      if (!drew) {
+        ctx.fillStyle = "#8b949e";
+        ctx.font = "13px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText("왼쪽에서 일러스트를 추출하면 여기에 표시됩니다.", W / 2, H / 2);
+      }
+    };
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(parent);
+    return () => ro.disconnect();
+  }, [lineArt, artwork, ver]);
+
+  return <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />;
+}
+
+// Korean labels for the capture viewpoint stored with a saved illustration.
+const CAMERA_VIEW_LABELS: Record<string, string> = {
+  perspective: "투시",
+  top: "윗면",
+  bottom: "아랫면",
+  front: "정면",
+  rear: "후면",
+  right: "우측",
+  left: "좌측",
+};
+
+// Right-column options drive the PREVIEW rendering (layers, shading, background,
+// style, box-apply size) and save finished illustrations to a reusable list.
+export function Step7RightOptions() {
   const lineArt = useStore((s) => s.lineArt);
   const updateLayer = useStore((s) => s.updateLineArtLayer);
   const artwork = useStore((s) => s.artwork);
   const update = useStore((s) => s.updateArtwork);
+  const cameraView = useStore((s) => s.cameraView);
+  const saved = useStore((s) => s.savedIllustrations);
+  const addSaved = useStore((s) => s.addSavedIllustration);
   const [open, setOpen] = useState<string | null>(null); // which colour picker is open
 
-  if (!lineArt) {
-    return (
-      <div className="note warn">
-        먼저 Step 7에서 일러스트를 추출하세요.
-      </div>
-    );
-  }
   const preset = getArtworkPreset(artwork.presetId);
   const bg = artwork.background ?? preset.background;
   const toggle = (k: string) => setOpen((cur) => (cur === k ? null : k));
 
+  let saveCounter = 0;
+  function saveCurrent() {
+    if (!lineArt) return;
+    const snapshot: LineArt = JSON.parse(JSON.stringify(lineArt));
+    const thumbnail = composeIllustration(snapshot, bg, 320, 240).toDataURL("image/png");
+    const viewLabel = CAMERA_VIEW_LABELS[cameraView] ?? cameraView;
+    const id = `ill_${saved.length}_${viewLabel}_${saveCounter++}`;
+    addSaved({
+      id,
+      name: `일러스트 ${saved.length + 1}`,
+      thumbnail,
+      lineArt: snapshot,
+      background: bg,
+      view: viewLabel,
+    });
+  }
+
   return (
     <div>
-      <p className="hint">
-        추출한 일러스트를 편집합니다. 레이어별 색상(CMYK)·투명도·겹치기 순서와 배경
-        색을 조절하고, 스타일 프리셋으로 빠르게 시작할 수 있습니다.
-      </p>
+      <div className="list-head" style={{ marginBottom: 8 }}>② 미리보기 — 렌더링 옵션</div>
 
-      <LineArtPreview art={lineArt} />
+      <Collapsible title={`저장된 일러스트 (${saved.length})`} defaultOpen>
+        <button
+          className="btn block"
+          disabled={!lineArt}
+          onClick={saveCurrent}
+          title={lineArt ? "현재 미리보기를 목록에 저장" : "먼저 일러스트를 추출하세요"}
+        >
+          ＋ 현재 렌더링 저장
+        </button>
+        <SavedIllustrationList />
+        <div className="note" style={{ marginTop: 6, color: "var(--text-dim)" }}>
+          저장한 일러스트는 다음 스텝에서 박스 면에 적용합니다.
+        </div>
+      </Collapsible>
 
-      <div className="list-head" style={{ margin: "12px 0 6px" }}>스타일 프리셋</div>
-      <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
-        {ARTWORK_PRESETS.map((p) => (
-          <button
-            key={p.id}
-            className={"seg-btn" + (artwork.presetId === p.id ? " on" : "")}
-            onClick={() => update({ presetId: p.id, background: undefined })}
-            title={p.name}
-          >
-            {p.name}
-          </button>
-        ))}
-      </div>
-
-      <div className="list-head" style={{ margin: "14px 0 6px" }}>배경 색 (CMYK)</div>
-      <button
-        className="swatch-row"
-        onClick={() => toggle("bg")}
-        style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}
-      >
-        <span style={{ width: 22, height: 22, borderRadius: 4, background: bg, border: "1px solid #2a313c" }} />
-        <span className="grow" style={{ textAlign: "left" }}>{bg}</span>
-        <span>{open === "bg" ? "▴" : "▾"}</span>
-      </button>
-      {open === "bg" && (
-        <div style={{ marginTop: 6 }}>
-          <ColorPicker value={bg} onChange={(hex) => update({ background: hex })} />
+      {!lineArt && (
+        <div className="note">
+          왼쪽에서 일러스트를 추출하면 색·음영·배경 편집 옵션이 표시됩니다.
         </div>
       )}
 
-      <div className="list-head" style={{ margin: "14px 0 6px" }}>
-        레이어 — 색·투명도·겹치기
-      </div>
-      {LAYER_ORDER.map((kind) => {
-        const layer = lineArt.layers.find((l) => l.kind === kind);
-        if (!layer) return null;
-        const col = layer.color ?? LAYER_META[kind].color;
-        const isRaster = kind === "shaded";
-        return (
-          <div
-            key={kind}
-            className="field"
-            style={{ borderLeft: `3px solid ${col}`, paddingLeft: 8 }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={layer.enabled}
-                onChange={(e) => updateLayer(kind, { enabled: e.target.checked })}
-              />
-              <span className="grow">{LAYER_META[kind].label}</span>
-              {!isRaster && (
+      {lineArt && (
+      <>
+          <Collapsible title="레이어 — 표시·색·투명도·겹치기" defaultOpen>
+            {LAYER_ORDER.map((kind) => {
+              const layer = lineArt.layers.find((l) => l.kind === kind);
+              if (!layer) return null;
+              const col = layer.color ?? LAYER_META[kind].color;
+              const isRaster = kind === "shaded";
+              return (
+                <div
+                  key={kind}
+                  className="field"
+                  style={{ borderLeft: `3px solid ${col}`, paddingLeft: 8 }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={layer.enabled}
+                      onChange={(e) => updateLayer(kind, { enabled: e.target.checked })}
+                    />
+                    <span className="grow">{LAYER_META[kind].label}</span>
+                    {!isRaster && (
+                      <button
+                        onClick={() => toggle(kind)}
+                        title="레이어 색상 (CMYK)"
+                        style={{ width: 20, height: 20, borderRadius: 4, background: col, border: "1px solid #2a313c", cursor: "pointer" }}
+                      />
+                    )}
+                  </div>
+                  {open === kind && !isRaster && (
+                    <div style={{ margin: "6px 0" }}>
+                      <ColorPicker value={col} onChange={(hex) => updateLayer(kind, { color: hex })} />
+                    </div>
+                  )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={layer.opacity}
+                      disabled={!layer.enabled}
+                      onChange={(e) => updateLayer(kind, { opacity: Number(e.target.value) })}
+                      style={{ flex: 1 }}
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={Math.round(layer.opacity * 100)}
+                      disabled={!layer.enabled}
+                      onChange={(e) =>
+                        updateLayer(kind, { opacity: Math.max(0, Math.min(100, Number(e.target.value))) / 100 })
+                      }
+                      style={{ width: 56 }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </Collapsible>
+
+          <Collapsible title="음영 보정 — 밝기·대비·빛 방향">
+            {(() => {
+              const sh = lineArt.layers.find((l) => l.kind === "shaded");
+              if (!sh || !sh.albedoImage || !sh.normalImage) {
+                return (
+                  <div className="note">
+                    음영 보정은 일러스트를 다시 추출한 뒤 사용할 수 있습니다 (음영
+                    데이터 없음).
+                  </div>
+                );
+              }
+              const brightness = sh.brightness ?? 1;
+              const contrast = sh.contrast ?? 1;
+              const lx = sh.lightX ?? 0.35;
+              const ly = sh.lightY ?? 0.45;
+              return (
+                <div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={sh.enabled}
+                      onChange={(e) => updateLayer("shaded", { enabled: e.target.checked })}
+                    />
+                    <span>음영 렌더링 표시</span>
+                  </label>
+
+                  <div className="field" style={{ marginTop: 8 }}>
+                    <label>밝기 {Math.round(brightness * 100)}%</label>
+                    <input
+                      type="range"
+                      min={0.2}
+                      max={2}
+                      step={0.01}
+                      value={brightness}
+                      onChange={(e) => updateLayer("shaded", { brightness: Number(e.target.value) })}
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>대비 {Math.round(contrast * 100)}%</label>
+                    <input
+                      type="range"
+                      min={0.2}
+                      max={2}
+                      step={0.01}
+                      value={contrast}
+                      onChange={(e) => updateLayer("shaded", { contrast: Number(e.target.value) })}
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label>빛 방향</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <LightPad
+                        x={lx}
+                        y={ly}
+                        onChange={(nx, ny) => updateLayer("shaded", { lightX: nx, lightY: ny })}
+                      />
+                      <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
+                        X {lx.toFixed(2)}
+                        <br />
+                        Y {ly.toFixed(2)}
+                        <br />
+                        <button
+                          className="btn secondary"
+                          style={{ marginTop: 4 }}
+                          onClick={() => updateLayer("shaded", { lightX: 0.35, lightY: 0.45 })}
+                        >
+                          기본값
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </Collapsible>
+
+          <Collapsible title="스타일 프리셋">
+            <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
+              {ARTWORK_PRESETS.map((p) => (
                 <button
-                  onClick={() => toggle(kind)}
-                  title="레이어 색상 (CMYK)"
-                  style={{ width: 20, height: 20, borderRadius: 4, background: col, border: "1px solid #2a313c", cursor: "pointer" }}
-                />
-              )}
+                  key={p.id}
+                  className={"seg-btn" + (artwork.presetId === p.id ? " on" : "")}
+                  onClick={() => update({ presetId: p.id, background: undefined })}
+                  title={p.name}
+                >
+                  {p.name}
+                </button>
+              ))}
             </div>
-            {open === kind && !isRaster && (
-              <div style={{ margin: "6px 0" }}>
-                <ColorPicker value={col} onChange={(hex) => updateLayer(kind, { color: hex })} />
+          </Collapsible>
+
+          <Collapsible title="배경 색 (CMYK)">
+            <button
+              className="swatch-row"
+              onClick={() => toggle("bg")}
+              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}
+            >
+              <span style={{ width: 22, height: 22, borderRadius: 4, background: bg, border: "1px solid #2a313c" }} />
+              <span className="grow" style={{ textAlign: "left" }}>{bg}</span>
+              <span>{open === "bg" ? "▴" : "▾"}</span>
+            </button>
+            {open === "bg" && (
+              <div style={{ marginTop: 6 }}>
+                <ColorPicker value={bg} onChange={(hex) => update({ background: hex })} />
               </div>
             )}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          </Collapsible>
+
+          <Collapsible title="박스 적용 크기">
+            <div className="field">
+              <label>페이스 대비 {(artwork.scale * 100).toFixed(0)}%</label>
               <input
                 type="range"
-                min={0}
+                min={0.1}
                 max={1}
-                step={0.01}
-                value={layer.opacity}
-                disabled={!layer.enabled}
-                onChange={(e) => updateLayer(kind, { opacity: Number(e.target.value) })}
-                style={{ flex: 1 }}
-              />
-              <input
-                type="number"
-                min={0}
-                max={100}
-                value={Math.round(layer.opacity * 100)}
-                disabled={!layer.enabled}
-                onChange={(e) =>
-                  updateLayer(kind, { opacity: Math.max(0, Math.min(100, Number(e.target.value))) / 100 })
-                }
-                style={{ width: 56 }}
+                step={0.02}
+                value={artwork.scale}
+                onChange={(e) => update({ scale: Number(e.target.value) })}
+                style={{ width: "100%" }}
               />
             </div>
-          </div>
-        );
-      })}
-
-      <div className="field" style={{ marginTop: 12 }}>
-        <label>박스 적용 크기 (페이스 대비 {(artwork.scale * 100).toFixed(0)}%)</label>
-        <input
-          type="range"
-          min={0.1}
-          max={1}
-          step={0.02}
-          value={artwork.scale}
-          onChange={(e) => update({ scale: Number(e.target.value) })}
-          style={{ width: "100%" }}
-        />
-      </div>
+          </Collapsible>
+      </>
+      )}
     </div>
   );
 }
 
-// ── Step 10 ───────────────────────────────────────────────────────────────────
+// The saved-illustration list: thumbnail + editable name + load/delete. Reads the
+// store directly so it stays in sync regardless of where it's mounted.
+function SavedIllustrationList() {
+  const saved = useStore((s) => s.savedIllustrations);
+  const remove = useStore((s) => s.removeSavedIllustration);
+  const rename = useStore((s) => s.renameSavedIllustration);
+  const setLineArt = useStore((s) => s.setLineArt);
+  const update = useStore((s) => s.updateArtwork);
+
+  if (!saved.length) {
+    return (
+      <div className="note" style={{ marginTop: 8 }}>
+        아직 저장된 일러스트가 없습니다.
+      </div>
+    );
+  }
+
+  function load(item: (typeof saved)[number]) {
+    setLineArt(JSON.parse(JSON.stringify(item.lineArt)));
+    update({ background: item.background });
+  }
+
+  return (
+    <div className="saved-list">
+      {saved.map((item) => (
+        <div className="saved-item" key={item.id}>
+          <img className="saved-thumb" src={item.thumbnail} alt={item.name} />
+          <div className="saved-meta">
+            <input
+              className="saved-name"
+              type="text"
+              value={item.name}
+              onChange={(e) => rename(item.id, e.target.value)}
+            />
+            <span className="saved-view">{item.view} 뷰</span>
+            <div className="saved-actions">
+              <button className="btn secondary" onClick={() => load(item)} title="이 일러스트를 편집기로 불러오기">
+                불러오기
+              </button>
+              <button className="btn secondary" onClick={() => remove(item.id)} title="삭제">
+                삭제
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Stacked fallback for any non-split context (the App routes step 7 to the
+// two-pane workspace, so this is only a safety net).
+function Step7Illustration() {
+  const lineArt = useStore((s) => s.lineArt);
+  return (
+    <div>
+      <Step7LeftOptions />
+      {lineArt && (
+        <div style={{ margin: "12px 0" }}>
+          <LineArtPreview art={lineArt} />
+        </div>
+      )}
+      <Step7RightOptions />
+    </div>
+  );
+}
+
+// ── shared panel helpers ───────────────────────────────────────────────────────
+// A lightweight collapsible "dropdown" section used to tidy long panels.
+function Collapsible({
+  title,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="collapsible">
+      <button className="collapsible-head" onClick={() => setOpen((o) => !o)}>
+        <span className="grow" style={{ textAlign: "left" }}>{title}</span>
+        <span className="collapsible-caret">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div className="collapsible-body">{children}</div>}
+    </div>
+  );
+}
+
+// A small square pad to pick a 2D light direction (x right, y up, -1..1).
+function LightPad({
+  x,
+  y,
+  onChange,
+}: {
+  x: number;
+  y: number;
+  onChange: (x: number, y: number) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const pick = (e: React.PointerEvent) => {
+    const el = ref.current;
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    const move = (cx: number, cy: number) => {
+      const r = el.getBoundingClientRect();
+      const nx = Math.max(-1, Math.min(1, ((cx - r.left) / r.width) * 2 - 1));
+      const ny = Math.max(-1, Math.min(1, -(((cy - r.top) / r.height) * 2 - 1)));
+      onChange(Number(nx.toFixed(2)), Number(ny.toFixed(2)));
+    };
+    move(e.clientX, e.clientY);
+    const onMove = (ev: PointerEvent) => move(ev.clientX, ev.clientY);
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+  return (
+    <div
+      ref={ref}
+      onPointerDown={pick}
+      title="빛 방향 (드래그)"
+      style={{
+        position: "relative",
+        width: 96,
+        height: 96,
+        borderRadius: "50%",
+        cursor: "crosshair",
+        touchAction: "none",
+        background:
+          "radial-gradient(circle at 50% 50%, #3a4250 0%, #1b2027 75%), #161b22",
+        border: "1px solid #2a313c",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: `${((x + 1) / 2) * 100}%`,
+          top: `${((1 - y) / 2) * 100}%`,
+          width: 12,
+          height: 12,
+          transform: "translate(-50%,-50%)",
+          borderRadius: "50%",
+          background: "#f0c674",
+          border: "2px solid #fff",
+          boxShadow: "0 0 8px 2px rgba(240,198,116,0.7)",
+          pointerEvents: "none",
+        }}
+      />
+    </div>
+  );
+}
+
+// ── (legacy text-on-box editor; not currently routed) ─────────────────────────
 function Step10Text() {
   const texts = useStore((s) => s.textElements);
   const add = useStore((s) => s.addText);

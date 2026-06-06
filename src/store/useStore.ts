@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   ArtworkConfig,
+  BoxFace,
   BoxForm,
   BoxSizing,
   DraftConfig,
@@ -14,6 +15,7 @@ import type {
   ModelTransform,
   PlacedModel,
   ProjectState,
+  SavedIllustration,
   Silhouette,
   TextElement,
   ViewName,
@@ -65,6 +67,8 @@ const initialProject: ProjectState = {
   boxSizing: initialBoxSizing,
   boxLidSide: "width",
   lineArt: null,
+  savedIllustrations: [],
+  boxFaceArtwork: {},
   artwork: initialArtwork,
   textElements: [],
 };
@@ -119,6 +123,9 @@ export interface AppStore extends ProjectState {
   /** Step 7 viewport: inspect the product, or preview it applied to the box. */
   step7View: "product" | "box";
   setStep7View: (v: "product" | "box") => void;
+  /** Step 8: show the box with its lid open (default) or closed. */
+  boxClosed: boolean;
+  setBoxClosed: (v: boolean) => void;
 
   // ── Multi-model management ───────────────────────────────────────────────────
   /** Import one or more products; the last one becomes selected. */
@@ -156,6 +163,12 @@ export interface AppStore extends ProjectState {
   setBoxLidSide: (side: LidSide) => void;
   setLineArt: (art: LineArt | null) => void;
   updateLineArtLayer: (kind: LineArtLayerKind, patch: Partial<LineArtLayer>) => void;
+  /** Step 7 — save / manage the list of finished illustrations. */
+  addSavedIllustration: (item: SavedIllustration) => void;
+  removeSavedIllustration: (id: string) => void;
+  renameSavedIllustration: (id: string, name: string) => void;
+  /** Step 8 — assign a saved illustration to a box face (null clears it). */
+  setBoxFaceArtwork: (face: BoxFace, illustrationId: string | null) => void;
   updateBoxSizing: (patch: Partial<BoxSizing>) => void;
   updateArtwork: (patch: Partial<ArtworkConfig>) => void;
   addText: (el: TextElement) => void;
@@ -179,6 +192,8 @@ export const useStore = create<AppStore>((set) => ({
   setCameraView: (cameraView) => set({ cameraView }),
   step7View: "product",
   setStep7View: (step7View) => set({ step7View }),
+  boxClosed: false,
+  setBoxClosed: (boxClosed) => set({ boxClosed }),
   boxTransform: null,
   setBoxTransform: (boxTransform) => set({ boxTransform }),
   boxEditMode: "resize",
@@ -340,6 +355,33 @@ export const useStore = create<AppStore>((set) => ({
           }
         : {}
     ),
+
+  addSavedIllustration: (item) =>
+    set((s) => ({ savedIllustrations: [...s.savedIllustrations, item] })),
+  removeSavedIllustration: (id) =>
+    set((s) => {
+      const boxFaceArtwork = { ...s.boxFaceArtwork };
+      for (const f of Object.keys(boxFaceArtwork) as BoxFace[]) {
+        if (boxFaceArtwork[f] === id) delete boxFaceArtwork[f];
+      }
+      return {
+        savedIllustrations: s.savedIllustrations.filter((i) => i.id !== id),
+        boxFaceArtwork,
+      };
+    }),
+  renameSavedIllustration: (id, name) =>
+    set((s) => ({
+      savedIllustrations: s.savedIllustrations.map((i) =>
+        i.id === id ? { ...i, name } : i
+      ),
+    })),
+  setBoxFaceArtwork: (face, illustrationId) =>
+    set((s) => {
+      const next = { ...s.boxFaceArtwork };
+      if (illustrationId) next[face] = illustrationId;
+      else delete next[face];
+      return { boxFaceArtwork: next };
+    }),
 
   updateBoxSizing: (patch) =>
     set((s) => ({ boxSizing: { ...s.boxSizing, ...patch } })),

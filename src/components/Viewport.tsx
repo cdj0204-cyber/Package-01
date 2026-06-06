@@ -15,9 +15,13 @@ export function Viewport({ kind }: { kind: ViewportKind }) {
   const setCameraView = useStore((s) => s.setCameraView);
   const lightContrast = useStore((s) => s.lightContrast);
   const setLightContrast = useStore((s) => s.setLightContrast);
+  const step7View = useStore((s) => s.step7View);
 
   const showGizmoControls =
-    kind === "3d" && modelCount > 0 && !!selectedModelId && step === 1;
+    kind === "3d" &&
+    modelCount > 0 &&
+    !!selectedModelId &&
+    (step === 1 || (step === 7 && step7View === "product"));
 
   const VIEW_OPTIONS: Array<{ v: CameraView; label: string }> = [
     { v: "perspective", label: "Perspective (자유 시점)" },

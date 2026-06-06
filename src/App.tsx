@@ -1,7 +1,12 @@
 import { useStore } from "./store/useStore";
 import { getStep, STEPS, STAGE_LABELS } from "./pipeline/steps";
 import { Viewport } from "./components/Viewport";
-import { PanelHost } from "./components/PanelHost";
+import {
+  PanelHost,
+  Step7LeftOptions,
+  Step7RightOptions,
+  IllustrationPreview,
+} from "./components/PanelHost";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,9 +37,10 @@ export function App() {
   } as Record<number, boolean>));
 
   const stages: Array<"A" | "B"> = ["A", "B"];
+  const splitStep = currentStep === 7; // illustration: 3D viewport ‖ preview
 
   return (
-    <div className="app">
+    <div className={"app" + (splitStep ? " app-split" : "")}>
       <div className="topbar">
         <h1>Package 01</h1>
         <span className="badge">스켈레톤</span>
@@ -75,13 +81,58 @@ export function App() {
         ))}
       </div>
 
-      <ErrorBoundary>
-        <Viewport kind={step.viewport} />
-      </ErrorBoundary>
+      {splitStep ? (
+        <>
+          <div className="s7-pane s7-left">
+            <div className="s7-visual">
+              <ErrorBoundary>
+                <Viewport kind="3d" />
+              </ErrorBoundary>
+            </div>
+            <div className="s7-opts">
+              <h2 style={{ fontSize: 14, margin: "0 0 10px" }}>
+                <span className="step-id">STEP {step.id}</span> · {step.title}
+              </h2>
+              <Step7LeftOptions />
+              <div className="nav-row" style={{ marginTop: 16 }}>
+                <button
+                  className="btn secondary"
+                  disabled={currentStep <= 1}
+                  onClick={() => setStep(currentStep - 1)}
+                >
+                  ← 이전
+                </button>
+                <button
+                  className="btn"
+                  disabled={currentStep >= STEPS.length}
+                  onClick={() => setStep(currentStep + 1)}
+                >
+                  다음 →
+                </button>
+              </div>
+            </div>
+          </div>
 
-      <div className="panel">
-        <PanelHost step={currentStep} />
-      </div>
+          <div className="s7-pane s7-right">
+            <div className="s7-visual s7-preview">
+              <IllustrationPreview />
+            </div>
+            <div className="s7-opts">
+              <Step7RightOptions />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <ErrorBoundary>
+            <Viewport kind={step.viewport} />
+          </ErrorBoundary>
+
+          <div className="panel">
+            <PanelHost step={currentStep} />
+          </div>
+        </>
+      )}
     </div>
   );
 }

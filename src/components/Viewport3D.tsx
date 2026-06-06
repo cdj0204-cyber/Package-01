@@ -6,9 +6,8 @@ import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { useStore } from "../store/useStore";
 import { lineArtBridge } from "./lineArtBridge";
 import { captureLineArt } from "./lineArtCapture";
-import { buildIllustrationCanvas } from "./compositeArtwork";
-import { getArtworkPreset } from "../box/presets";
-import type { ImportedMesh, PlacedModel } from "../types";
+import { composeIllustration } from "./illustrationRender";
+import type { BoxFace, ImportedMesh, PlacedModel } from "../types";
 import { type BoxPose } from "../geometry/boolean";
 import {
   buildExtrudeMesh,
@@ -259,6 +258,9 @@ export function Viewport3D() {
   // Latest step + box edit mode for the (one-time) pointer handlers.
   const stepRef = useRef(1);
   const boxModeRef = useRef<"resize" | "move" | "rotate">("resize");
+  // Lid-fold animation: current fold (0 open → 1 closed) + a box-rebuild hook.
+  const foldRef = useRef(useStore.getState().boxClosed ? 1 : 0);
+  const boxRebuildRef = useRef<((fold: number) => void) | null>(null);
   // What the transform gizmo currently drives.
   const tcTargetRef = useRef<{
     kind: "model" | "extrude" | "box";
@@ -280,8 +282,9 @@ export function Viewport3D() {
   const boxSizing = useStore((s) => s.boxSizing);
   const boxLidSide = useStore((s) => s.boxLidSide);
   const step7View = useStore((s) => s.step7View);
-  const lineArt = useStore((s) => s.lineArt);
-  const artwork = useStore((s) => s.artwork);
+  const savedIllustrations = useStore((s) => s.savedIllustrations);
+  const boxFaceArtwork = useStore((s) => s.boxFaceArtwork);
+  const boxClosed = useStore((s) => s.boxClosed);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
   const cameraView = useStore((s) => s.cameraView);
@@ -291,7 +294,7 @@ export function Viewport3D() {
   // with the illustration applied instead.
   const showModel = step <= 2 || (step === 7 && step7View === "product");
   const boxVisible =
-    (step >= 5 && step <= 10 && step !== 7) ||
+    (step >= 5 && step <= 8 && step !== 7) ||
     (step === 7 && step7View === "box");
 
   // ── one-time scene setup ────────────────────────────────────────────────────
@@ -863,7 +866,9 @@ export function Viewport3D() {
 
     const sil = selectedModelId ? modelSilhouettes[selectedModelId] : undefined;
     const boxPivot = boxPivotRef.current;
-    if (step === 1 && selectedModelId && map.get(selectedModelId)) {
+    const modelGizmoStep =
+      step === 1 || (step === 7 && step7View === "product");
+    if (modelGizmoStep && selectedModelId && map.get(selectedModelId)) {
       tcTargetRef.current = { kind: "model", id: selectedModelId };
       tc.setMode(gizmoMode);
       tc.showX = tc.showY = tc.showZ = true;
@@ -899,6 +904,7 @@ export function Viewport3D() {
     models,
     showModel,
     step,
+    step7View,
     modelSilhouettes,
     gizmoMode,
     boxEditMode,
@@ -975,7 +981,7 @@ export function Viewport3D() {
     // Step 4 / 11 — the boolean result (insert foam). Rendered as an OPAQUE
     // shaded solid with edge lines (CAD "shaded + edges" look) so the cut cavity
     // reads clearly as a recess — no transparency to wash the form out.
-    if ((step === 4 || step === 11) && insertFoam.mesh) {
+    if ((step === 4 || step === 10) && insertFoam.mesh) {
       const foam = toThreeMesh(insertFoam.mesh, 1, true);
       const fmat = foam.material as THREE.MeshStandardMaterial;
       fmat.color.setHex(0x9aa3ad);
@@ -1009,11 +1015,14 @@ export function Viewport3D() {
     // rendered as real corrugated board: every panel is extruded to board
     // thickness with darker brown flute edges (vertex-coloured), so it reads as a
     // realistic cardboard box rather than a flat cuboid.
-    if (showBox && boxPresetId) {
+    // Build the box group at a given lid-fold factor (0 open → 1 closed). Kept as
+    // a closure so the fold animation can rebuild just the box each frame.
+    const makeBox = (fold: number): THREE.Group | null => {
+      if (!(showBox && boxPresetId)) return null;
       const preset = getBoxPreset(boxPresetId);
       const kind = preset?.dielineKind ?? "tuck-end-rte";
       const { width: bw, depth: bd, height: bh } = boxSizing;
-      const model = buildBoxModel(kind, bw, bd, bh, boxLidSide);
+      const model = buildBoxModel(kind, bw, bd, bh, boxLidSide, fold);
       const group = new THREE.Group();
       group.position.set(center[0], 0, center[1]);
 
@@ -1087,40 +1096,136 @@ export function Viewport3D() {
       );
       group.add(mesh);
 
-      // Apply the Step-7 line drawing to the box FRONT face (+Z wall) as a flat
-      // textured decal, sized by the artwork scale and placed per its x/y.
-      if (lineArt && lineArt.layers.some((l) => l.enabled)) {
-        const preset = getArtworkPreset(artwork.presetId);
+      // Apply saved illustrations assigned to box faces (Step 8) as flat,
+      // background-filled printed panels covering each chosen face.
+      const EPS = 0.6;
+      const sideT = t * 2; // doubled side walls
+      const faceDefs: Partial<Record<
+        BoxFace,
+        { size: [number, number]; pos: [number, number, number]; rot: [number, number, number] }
+      >> = {
+        front: { size: [bw, bh], pos: [0, bh / 2, bd / 2 + t / 2 + EPS], rot: [0, 0, 0] },
+        back: { size: [bw, bh], pos: [0, bh / 2, -bd / 2 - t / 2 - EPS], rot: [0, Math.PI, 0] },
+        right: { size: [bd, bh], pos: [bw / 2 + sideT / 2 + EPS, bh / 2, 0], rot: [0, Math.PI / 2, 0] },
+        left: { size: [bd, bh], pos: [-bw / 2 - sideT / 2 - EPS, bh / 2, 0], rot: [0, -Math.PI / 2, 0] },
+        top: { size: [bw, bd], pos: [0, bh + t / 2 + EPS, 0], rot: [-Math.PI / 2, 0, 0] },
+      };
+      // Oriented placement on an arbitrary panel quad [h0,h1,f1,f0] (used for the
+      // tilted lid and the front tuck flap). Lands the decal on the OUTER face.
+      const quadPlacement = (quad: [number, number, number][]) => {
+        const toV = (p: [number, number, number]) => new THREE.Vector3(p[0], p[1], p[2]);
+        const [H0, H1, , F0] = quad.map(toV);
+        const hinge = new THREE.Vector3().subVectors(H1, H0); // along the hinge
+        const along = new THREE.Vector3().subVectors(F0, H0); // hinge → free edge
+        const fw = hinge.length() || 1;
+        const fh = along.length() || 1;
+        const ctr = quad.reduce((acc, p) => acc.add(toV(p)), new THREE.Vector3()).multiplyScalar(0.25);
+        const outward = ctr.clone().sub(new THREE.Vector3(0, bh / 2, 0)); // away from body
+        const aUnit = along.clone().normalize();
+        const vAxis = aUnit.y >= 0 ? aUnit.clone() : aUnit.clone().multiplyScalar(-1); // up
+        let nAxis = new THREE.Vector3().crossVectors(hinge.clone().normalize(), aUnit).normalize();
+        if (nAxis.dot(outward) < 0) nAxis.multiplyScalar(-1); // face outward
+        let uAxis = hinge.clone().normalize();
+        if (new THREE.Vector3().crossVectors(uAxis, vAxis).dot(nAxis) < 0) uAxis.multiplyScalar(-1);
+        nAxis = new THREE.Vector3().crossVectors(uAxis, vAxis).normalize();
+        const center = ctr.clone().addScaledVector(nAxis, t / 2 + EPS);
+        const m = new THREE.Matrix4().makeBasis(uAxis, vAxis, nAxis).setPosition(center);
+        return { fw, fh, m };
+      };
+      // Placement (size + world transform) for a face. "top" maps to the tilted lid
+      // panel and "tuck" to the front tuck flap (g-type); others are flat body faces.
+      const facePlacement = (
+        faceKey: BoxFace
+      ): { fw: number; fh: number; m: THREE.Matrix4 } | null => {
+        const quad =
+          faceKey === "top" ? model.lidQuad : faceKey === "tuck" ? model.tuckQuad : null;
+        if (faceKey === "tuck") return quad && quad.length >= 4 ? quadPlacement(quad) : null;
+        if (faceKey === "top" && quad && quad.length >= 4) return quadPlacement(quad);
+        const def = faceDefs[faceKey];
+        if (!def) return null;
+        const m = new THREE.Matrix4()
+          .makeRotationFromEuler(new THREE.Euler(def.rot[0], def.rot[1], def.rot[2]))
+          .setPosition(def.pos[0], def.pos[1], def.pos[2]);
+        return { fw: def.size[0], fh: def.size[1], m };
+      };
+
+      for (const faceKey of Object.keys(boxFaceArtwork) as BoxFace[]) {
+        // The front face is covered by the tuck flap once closing past halfway, so
+        // hide its illustration there (the tuck face carries the closed-front art).
+        if (faceKey === "front" && fold > 0.5) continue;
+        const illId = boxFaceArtwork[faceKey];
+        const saved = savedIllustrations.find((s) => s.id === illId);
+        if (!saved) continue;
+        const placement = facePlacement(faceKey);
+        if (!placement) continue;
+        const { fw, fh, m } = placement;
+        const TEXW = 640;
+        const TEXH = Math.max(1, Math.round((TEXW * fh) / fw));
         let tex: THREE.CanvasTexture | null = null;
-        const canvas = buildIllustrationCanvas(lineArt, preset.lineColor, () => {
+        const canvas = composeIllustration(saved.lineArt, saved.background, TEXW, TEXH, () => {
           if (tex) tex.needsUpdate = true;
         });
         tex = new THREE.CanvasTexture(canvas);
         tex.needsUpdate = true;
-        const iw = (lineArt.bbox.max[0] - lineArt.bbox.min[0]) * lineArt.aspect || 1;
-        const ih = lineArt.bbox.max[1] - lineArt.bbox.min[1] || 1;
-        const sc = Math.min((bw * artwork.scale) / iw, (bh * artwork.scale) / ih);
         const plane = new THREE.Mesh(
-          new THREE.PlaneGeometry(iw * sc, ih * sc),
+          new THREE.PlaneGeometry(fw, fh),
           new THREE.MeshBasicMaterial({
             map: tex,
-            transparent: true,
             side: THREE.DoubleSide,
             depthWrite: false,
           })
         );
-        const tBoard = Math.min(6, Math.max(1.5, Math.min(bw, bd, bh) * 0.03));
-        plane.position.set(
-          (artwork.x - 0.5) * bw,
-          artwork.y * bh,
-          bd / 2 + tBoard + 0.5
-        );
+        plane.applyMatrix4(m);
         group.add(plane);
       }
 
-      content.add(group);
+      return group;
+    };
+
+    // Mount the box at the current fold, and expose a rebuild fn for the fold
+    // animation to call each frame.
+    let boxGroup = makeBox(foldRef.current);
+    if (boxGroup) content.add(boxGroup);
+    boxRebuildRef.current =
+      showBox && boxPresetId
+        ? (fold: number) => {
+            if (boxGroup) {
+              content.remove(boxGroup);
+              disposeGroup(boxGroup);
+            }
+            boxGroup = makeBox(fold);
+            if (boxGroup) content.add(boxGroup);
+          }
+        : null;
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork]);
+
+  // ── Step 8: animate the G-type lid open ⇄ closed when the toggle flips ─────────
+  useEffect(() => {
+    const target = boxClosed ? 1 : 0;
+    const from = foldRef.current;
+    if (Math.abs(from - target) < 1e-4) {
+      foldRef.current = target;
+      return;
     }
-  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, lineArt, artwork]);
+    let raf = 0;
+    let startT = 0;
+    const dur = 650;
+    const ease = (t: number) =>
+      t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+    const tick = (now: number) => {
+      if (!startT) startT = now;
+      const t = Math.min(1, (now - startT) / dur);
+      foldRef.current = from + (target - from) * ease(t);
+      boxRebuildRef.current?.(foldRef.current);
+      if (t < 1) raf = requestAnimationFrame(tick);
+      else {
+        foldRef.current = target;
+        boxRebuildRef.current?.(target);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [boxClosed]);
 
   // ── Step 3: editable box form (resize face-arrows / move / rotate) ────────────
   useEffect(() => {

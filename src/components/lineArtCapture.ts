@@ -57,11 +57,24 @@ export function captureLineArt(
   if (!isFinite(minx)) return null;
   const bbox = { min: [minx, miny] as [number, number], max: [maxx, maxy] as [number, number] };
 
-  const image = renderShaded(renderer, scene, modelsRoot, cam, mount, bbox);
+  // Capture a flat albedo + a view-space normal map so the shaded layer can be
+  // re-lit (brightness/contrast/light direction) in 2D later.
+  const albedo = renderCropped(renderer, scene, modelsRoot, cam, mount, bbox, () => swapBasic(modelsRoot));
+  const normal = renderCropped(renderer, scene, modelsRoot, cam, mount, bbox, () => overrideMat(scene, new THREE.MeshNormalMaterial()));
 
   const layers: LineArtLayer[] = [
     { kind: "silhouette", enabled: false, opacity: 1, segments: silSegs },
-    { kind: "shaded", enabled: false, opacity: 1, ...(image ? { image } : {}) },
+    {
+      kind: "shaded",
+      enabled: false,
+      opacity: 1,
+      ...(albedo ? { image: albedo, albedoImage: albedo } : {}),
+      ...(normal ? { normalImage: normal } : {}),
+      brightness: 1,
+      contrast: 1,
+      lightX: 0.35,
+      lightY: 0.45,
+    },
     { kind: "edges", enabled: true, opacity: 1, segments: edgeSegs },
     { kind: "wireframe", enabled: false, opacity: 0.4, segments: wireSegs },
   ];
@@ -191,15 +204,51 @@ function withProductOnly(
   }
 }
 
-// Render only the product (lit) to an offscreen target, crop to the NDC bbox,
-// and return a PNG dataURL.
-function renderShaded(
+// Temporarily swap every product mesh to an unlit MeshBasicMaterial that keeps
+// its base colour/texture — yields a flat albedo render. Returns a restore fn.
+function swapBasic(modelsRoot: THREE.Object3D): () => void {
+  const saved: Array<[THREE.Mesh, THREE.Material | THREE.Material[]]> = [];
+  modelsRoot.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!(m as any).isMesh || !m.material) return;
+    saved.push([m, m.material]);
+    const src: any = Array.isArray(m.material) ? m.material[0] : m.material;
+    m.material = new THREE.MeshBasicMaterial({
+      color: src?.color ? src.color.clone() : new THREE.Color(0xb4b4b4),
+      map: src?.map ?? null,
+      vertexColors: !!src?.vertexColors,
+      side: src?.side ?? THREE.FrontSide,
+    });
+  });
+  return () => {
+    for (const [m, mat] of saved) {
+      (m.material as any)?.dispose?.();
+      m.material = mat;
+    }
+  };
+}
+
+// Force a single override material on the whole scene (e.g. MeshNormalMaterial
+// for a view-space normal pass). Returns a restore fn.
+function overrideMat(scene: THREE.Scene, mat: THREE.Material): () => void {
+  const prev = scene.overrideMaterial;
+  scene.overrideMaterial = mat;
+  return () => {
+    scene.overrideMaterial = prev;
+    mat.dispose();
+  };
+}
+
+// Render only the product to an offscreen target (optionally with a material
+// `prep` applied), crop to the NDC bbox, and return a PNG dataURL.
+function renderCropped(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
   modelsRoot: THREE.Object3D,
   cam: THREE.Camera,
   mount: HTMLElement,
-  bbox: { min: [number, number]; max: [number, number] }
+  bbox: { min: [number, number]; max: [number, number] },
+  prep?: () => () => void
 ): string | null {
   const H = Math.min(720, Math.max(240, mount.clientHeight || 480));
   const W = Math.max(
@@ -210,9 +259,11 @@ function renderShaded(
   let url: string | null = null;
 
   withProductOnly(renderer, scene, modelsRoot, [0x000000, 0], () => {
+    const restore = prep ? prep() : () => {};
     renderer.setRenderTarget(target);
     renderer.clear();
     renderer.render(scene, cam);
+    restore();
 
     const clampX = (v: number) => Math.max(0, Math.min(W, v));
     const clampY = (v: number) => Math.max(0, Math.min(H, v));

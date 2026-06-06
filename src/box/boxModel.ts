@@ -20,6 +20,14 @@ export type V3 = [number, number, number];
 export interface BoxModel {
   faces: V3[][];
   color: [number, number, number];
+  /**
+   * The lid cover panel as an ordered quad [hinge0, hinge1, tip1, tip0], when the
+   * box has a hinged lid (g-type/mailer). The renderer maps the "top" face
+   * illustration onto this tilted panel instead of the flat body top.
+   */
+  lidQuad?: V3[];
+  /** The front tuck-flap panel quad (g-type), which covers the front when closed. */
+  tuckQuad?: V3[];
 }
 
 const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -109,7 +117,8 @@ export function buildBoxModel(
   W: number,
   D: number,
   H: number,
-  lidSide: LidSide = "width"
+  lidSide: LidSide = "width",
+  fold = 0 // 0 = lid fully open, 1 = lid fully closed (g-type only)
 ): BoxModel {
   const hx = W / 2;
   const hz = D / 2;
@@ -171,7 +180,6 @@ export function buildBoxModel(
       //   • hd  = hinge direction (along the hinge edge)
       //   • od  = outward flat direction the lid folds over (horizontal)
       //   • H0,H1 = the two hinge corners;  coverLen = dimension the lid covers
-      const lidAngle = kind === "g-type" ? 110 : 120; // both open, slightly diff
       const onDepth = lidSide === "depth";
       const up: V3 = [0, 1, 0];
       const H0: V3 = t00;
@@ -180,17 +188,30 @@ export function buildBoxModel(
       const od: V3 = onDepth ? [1, 0, 0] : [0, 0, 1];
       const coverLen = onDepth ? W : D;
 
-      const lid = flap(H0, H1, od, up, coverLen, lidAngle); // [H0,H1,tipB,tipA]
-      const tipB = lid[2]; // lid far tip on the H1 side
-      const tipA = lid[3]; // lid far tip on the H0 side
+      // Continuous lid-fold animation, k = 0 (open) → 1 (closed). Every sub-flap
+      // angle interpolates so k=0 reproduces the open pose and k=1 the closed one:
+      //   1) lid sweeps from leaning back (110°) down flat onto the top (0°)
+      //   2) lid side wings fold from up-front (100°) to −90° (down inside the box)
+      //   3) front tuck flap rotates to point straight down the front (90° to lid)
+      //   4) tuck side wings fold further (60°→90°), tucking into the side gap
+      const k = Math.max(0, Math.min(1, fold));
+      const lerp = (a: number, b: number) => a + (b - a) * k;
+
+      // (1) Lid panel.
+      const lidDeg = lerp(110, 0);
+      const lid = flap(H0, H1, od, up, coverLen, lidDeg); // [H0,H1,tipB,tipA]
+      const tipB = lid[2];
+      const tipA = lid[3];
       const alongLid: V3 = nrm(sub(tipA, H0)); // hinge → tip, along the lid
 
-      // Rule 1: front tuck flap length == box height (H). Unit direction (58°
-      // forward off the lid, toward the opening `od`) so length is exactly H.
+      // (3) Front tuck flap. β = the angle between the flap and the lid plane,
+      // following the requested curve through (open 73.25°, mid 45°, closed 88°)
+      // via a quadratic that hits all three points exactly. The flap then sits β
+      // below the lid continuation in the (od, up) plane (φ = lidDeg − β).
       const tuckLen = H;
-      const tuckUnit: V3 = nrm(
-        add(mul(alongLid, Math.cos(58 * DEG)), mul(od, Math.sin(58 * DEG)))
-      );
+      const betaDeg = 142.5 * k * k - 127.75 * k + 73.25;
+      const phi = (lidDeg - betaDeg) * DEG;
+      const tuckUnit: V3 = nrm(add(mul(od, Math.cos(phi)), mul(up, Math.sin(phi))));
       const tuck: V3[] = [
         tipA,
         tipB,
@@ -198,37 +219,41 @@ export function buildBoxModel(
         add(tipA, mul(tuckUnit, tuckLen)),
       ];
 
-      // Lid side wings: flat ears (extending ∓hd from the side edges) folded 100°
-      // toward the lid's up-front normal. outL/outR run along ∓hd.
+      // (2) Lid side wings — robust outward lid normal (prefer +Y, else +od so the
+      // flat-lid case stays correct), then fold from +100° to −90° (into the box).
       const wingW = H; // rule 3: lid side-wing length = box height
-      let lidNormal: V3 = nrm(cross(hd, alongLid));
-      if (lidNormal[0] * od[0] + lidNormal[1] * od[1] + lidNormal[2] * od[2] < 0)
-        lidNormal = mul(lidNormal, -1); // ensure up-front (toward od)
+      // Continuous lid normal (no sign flip) so the wing fold stays smooth as the
+      // lid sweeps past vertical.
+      const lidNormal: V3 = nrm(cross(hd, alongLid));
       const outL: V3 = mul(hd, -1);
       const outR: V3 = hd;
       const wingR = wingW * 0.4; // corner radius
+      // Wings are RIGID: fixed at +100° relative to the lid (folded toward its
+      // front/inner face) and never change angle — they just move together with
+      // the lid. Because the lid normal is continuous, this single fixed angle
+      // gives "front-up when open" and naturally "down inside when closed".
+      const wingDeg = 100;
       const lidWingLeft = roundCorners(
-        flap(H0, tipA, outL, lidNormal, wingW, 100),
+        flap(H0, tipA, outL, lidNormal, wingW, wingDeg),
         [2, 3],
         wingR
       );
       const lidWingRight = roundCorners(
-        flap(H1, tipB, outR, lidNormal, wingW, 100),
+        flap(H1, tipB, outR, lidNormal, wingW, wingDeg),
         [2, 3],
         wingR
       );
 
-      // Front-tuck side wings: COPLANAR with the tuck flap, extending ∓hd from the
-      // flap side edges, narrowing toward the tip (symmetric parallelogram).
+      // (4) Front-tuck side wings: coplanar with the tuck flap, folded about the
+      // flap side edges from 60° (open) to 90° (closed, into the side gap). The
+      // fold sign is whichever pulls the free corner toward the box interior.
       const tuckTipB = tuck[2];
       const tuckTipA = tuck[3];
       const tuckDir: V3 = nrm(sub(tuckTipA, tipA)); // along the flap, hinge→tip
-      const tWingW = Math.min(D, 100); // rule 2: tuck side-wing length = box depth, capped at 100 mm
-      const tTaper = tuckLen * 0.2; // slight narrowing toward the free edge
-      const tHalf = tTaper / 2; // split the taper both ends → symmetric (no skew)
-      const tWingR = tWingW * 0.4; // free-corner radius (same idea as lid wings)
-      // Round the two FREE corners (idx 2 & 3) BEFORE folding so the hinge
-      // vertices (idx 0 & 1) stay on the fold axis.
+      const tWingW = Math.min(D, 100); // rule 2: tuck side-wing length, capped at 100 mm
+      const tTaper = tuckLen * 0.2;
+      const tHalf = tTaper / 2;
+      const tWingR = tWingW * 0.4;
       const tuckWingLeftFlat = roundCorners(
         [
           tipA,
@@ -249,17 +274,18 @@ export function buildBoxModel(
         [2, 3],
         tWingR
       );
-      // Fold each tuck side wing DOWN ~60° about its hinge. The down-going sign
-      // depends on orientation, so pick whichever lowers the free corner's Y.
-      const tuckFold = 60 * DEG;
-      const downSign = (wing: V3[], origin: V3): number => {
+      // Tuck side-wing fold vs the flap plane: 60° (open) → 90° by k=0.25, then
+      // held at 90° (perpendicular) through to closed.
+      const tuckFold = (k <= 0.25 ? 60 + 120 * k : 90) * DEG;
+      const boxCtr: V3 = [0, H / 2, 0];
+      const inSign = (wing: V3[], origin: V3): number => {
         const probe = wing[2];
-        const yp = rotateAboutAxis(probe, origin, tuckDir, tuckFold)[1];
-        const ym = rotateAboutAxis(probe, origin, tuckDir, -tuckFold)[1];
-        return yp <= ym ? tuckFold : -tuckFold;
+        const dp = dist(rotateAboutAxis(probe, origin, tuckDir, tuckFold), boxCtr);
+        const dm = dist(rotateAboutAxis(probe, origin, tuckDir, -tuckFold), boxCtr);
+        return dp <= dm ? tuckFold : -tuckFold;
       };
-      const lSign = downSign(tuckWingLeftFlat, tipA);
-      const rSign = downSign(tuckWingRightFlat, tipB);
+      const lSign = inSign(tuckWingLeftFlat, tipA);
+      const rSign = inSign(tuckWingRightFlat, tipB);
       const tuckWingLeft = tuckWingLeftFlat.map((p) =>
         rotateAboutAxis(p, tipA, tuckDir, lSign)
       );
@@ -279,6 +305,8 @@ export function buildBoxModel(
           tuckWingRight,
         ],
         color: KRAFT,
+        lidQuad: lid, // [H0, H1, tipB, tipA]
+        tuckQuad: tuck, // [tipA, tipB, tuckTipB, tuckTipA] — front cover when closed
       };
     }
 
