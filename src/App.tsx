@@ -36,7 +36,7 @@ export function App() {
     11: s.insertFoam.ready,
   } as Record<number, boolean>));
 
-  const stages: Array<"A" | "B"> = ["A", "B"];
+  const stages: Array<"A" | "B" | "C"> = ["A", "B", "C"];
   const splitStep = currentStep === 7; // illustration: 3D viewport ‖ preview
 
   return (
@@ -61,7 +61,7 @@ export function App() {
         {stages.map((stage) => (
           <div key={stage}>
             <div className="stage-label">
-              {stage === "A" ? "STAGE A" : "STAGE B"} · {STAGE_LABELS[stage]}
+              STAGE {stage} · {STAGE_LABELS[stage]}
             </div>
             {STEPS.filter((s) => s.stage === stage).map((s) => (
               <div
@@ -94,6 +94,15 @@ export function App() {
                 <span className="step-id">STEP {step.id}</span> · {step.title}
               </h2>
               <Step7LeftOptions />
+            </div>
+          </div>
+
+          <div className="s7-pane s7-right">
+            <div className="s7-visual s7-preview">
+              <IllustrationPreview />
+            </div>
+            <div className="s7-opts">
+              <Step7RightOptions />
               <div className="nav-row" style={{ marginTop: 16 }}>
                 <button
                   className="btn secondary"
@@ -110,15 +119,6 @@ export function App() {
                   다음 →
                 </button>
               </div>
-            </div>
-          </div>
-
-          <div className="s7-pane s7-right">
-            <div className="s7-visual s7-preview">
-              <IllustrationPreview />
-            </div>
-            <div className="s7-opts">
-              <Step7RightOptions />
             </div>
           </div>
         </>

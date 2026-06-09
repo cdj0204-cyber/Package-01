@@ -4,6 +4,7 @@ import type {
   BoxFace,
   BoxForm,
   BoxSizing,
+  BoxText,
   DraftConfig,
   FaceArtTransform,
   ImportedModel,
@@ -71,6 +72,7 @@ const initialProject: ProjectState = {
   savedIllustrations: [],
   boxFaceArtwork: {},
   boxFaceTransform: {},
+  boxTexts: [],
   artwork: initialArtwork,
   textElements: [],
 };
@@ -179,6 +181,10 @@ export interface AppStore extends ProjectState {
     face: BoxFace,
     patch: Partial<FaceArtTransform> | null
   ) => void;
+  /** Step 8 — box-face text labels. */
+  addBoxText: (t: BoxText) => void;
+  updateBoxText: (id: string, patch: Partial<BoxText>) => void;
+  removeBoxText: (id: string) => void;
   updateBoxSizing: (patch: Partial<BoxSizing>) => void;
   updateArtwork: (patch: Partial<ArtworkConfig>) => void;
   addText: (el: TextElement) => void;
@@ -413,6 +419,14 @@ export const useStore = create<AppStore>((set) => ({
       }
       return { boxFaceTransform: next };
     }),
+
+  addBoxText: (t) => set((s) => ({ boxTexts: [...s.boxTexts, t] })),
+  updateBoxText: (id, patch) =>
+    set((s) => ({
+      boxTexts: s.boxTexts.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    })),
+  removeBoxText: (id) =>
+    set((s) => ({ boxTexts: s.boxTexts.filter((t) => t.id !== id) })),
 
   updateBoxSizing: (patch) =>
     set((s) => ({ boxSizing: { ...s.boxSizing, ...patch } })),

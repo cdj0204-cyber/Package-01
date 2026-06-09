@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// The 12-step pipeline definition. Grouped into two stages:
-//   Stage A — Insert foam (geometry):       steps 1..5 + export 12
-//   Stage B — Package box (box & artwork):  steps 6..11
+// The pipeline definition, grouped into three stages:
+//   Stage A — Insert foam (geometry):     steps 1..4
+//   Stage B — Package box (design):       steps 5..8
+//   Stage C — Data export (download):     steps 9 (dieline) + 10 (foam)
 // Each step renders a contextual panel (see components/panels) and a viewport.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -11,7 +12,7 @@ export interface StepDef {
   id: number;
   title: string;
   short: string;
-  stage: "A" | "B";
+  stage: "A" | "B" | "C";
   viewport: ViewportKind;
 }
 
@@ -24,15 +25,16 @@ export const STEPS: StepDef[] = [
   { id: 6, title: "박스 크기/공차 설정", short: "박스설정", stage: "B", viewport: "3d" },
   { id: 7, title: "일러스트 추출·편집", short: "일러스트", stage: "B", viewport: "3d" },
   { id: 8, title: "박스 렌더링 확인", short: "렌더링", stage: "B", viewport: "3d" },
-  { id: 9, title: "도면 데이터 다운로드 (AI/DXF/SVG)", short: "도면출력", stage: "B", viewport: "2d-dieline" },
-  { id: 10, title: "인서트 폼 다운로드 (STL/STEP/FBX/OBJ)", short: "폼출력", stage: "A", viewport: "3d" },
+  { id: 9, title: "도면 데이터 다운로드 (AI/DXF/SVG)", short: "도면출력", stage: "C", viewport: "2d-dieline" },
+  { id: 10, title: "인서트 폼 다운로드 (STL/STEP/FBX/OBJ)", short: "폼출력", stage: "C", viewport: "3d" },
 ];
 
 export function getStep(id: number): StepDef {
   return STEPS.find((s) => s.id === id) ?? STEPS[0];
 }
 
-export const STAGE_LABELS: Record<"A" | "B", string> = {
+export const STAGE_LABELS: Record<"A" | "B" | "C", string> = {
   A: "인서트 폼 (지오메트리)",
   B: "패키지 박스 (디자인)",
+  C: "데이터 출력 (다운로드)",
 };

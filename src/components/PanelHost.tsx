@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore, type CameraView } from "../store/useStore";
 import { getStep, STEPS } from "../pipeline/steps";
-import { VIEW_NAMES, type BoxFace, type ViewName, type ModelSilhouette, type LidSide, type LineArt, type LineArtLayerKind } from "../types";
+import { VIEW_NAMES, type BoxFace, type BoxText, type ViewName, type ModelSilhouette, type LidSide, type LineArt, type LineArtLayerKind } from "../types";
 import { lineArtBridge } from "./lineArtBridge";
 import { ColorPicker } from "./ColorPicker";
 import { drawIllustration, composeIllustration } from "./illustrationRender";
@@ -935,6 +935,7 @@ function Step5Insert() {
 
 // ── Step 6 ────────────────────────────────────────────────────────────────────
 function Step6BoxType() {
+  useAutoBoxSizing();
   const boxPresetId = useStore((s) => s.boxPresetId);
   const setBoxPreset = useStore((s) => s.setBoxPreset);
   const boxForm = useStore((s) => s.boxForm);
@@ -979,8 +980,53 @@ function Step6BoxType() {
   );
 }
 
+/**
+ * Keep the box volume sized to actually CONTAIN the insert foam while in "offset"
+ * mode: box inner dims = the foam block (boxForm — the Step-3 block the foam was
+ * carved from) grown by the offset on every side, and the height grown by the
+ * offset so the foam never pokes out the top. Re-derives whenever the foam block
+ * or offset changes (and once on mount), so the box always wraps the current foam
+ * without the user having to press a button. Manual mode is left untouched.
+ */
+function useAutoBoxSizing() {
+  const mode = useStore((s) => s.boxSizing.mode);
+  const offset = useStore((s) => s.boxSizing.offset);
+  const foam = useStore((s) => s.insertFoam);
+  const update = useStore((s) => s.updateBoxSizing);
+  useEffect(() => {
+    if (mode !== "offset" || !foam.ready || !foam.mesh) return;
+    // Measure the ACTUAL foam mesh (not the Step-3 block, which can drift) so the
+    // box is guaranteed to contain it: inner dims = foam extent + offset.
+    const p = foam.mesh.positions;
+    let mnx = Infinity,
+      mny = Infinity,
+      mnz = Infinity,
+      mxx = -Infinity,
+      mxy = -Infinity,
+      mxz = -Infinity;
+    for (let i = 0; i < p.length; i += 3) {
+      const x = p[i],
+        y = p[i + 1],
+        z = p[i + 2];
+      if (x < mnx) mnx = x;
+      if (y < mny) mny = y;
+      if (z < mnz) mnz = z;
+      if (x > mxx) mxx = x;
+      if (y > mxy) mxy = y;
+      if (z > mxz) mxz = z;
+    }
+    if (!isFinite(mnx)) return;
+    update({
+      width: mxx - mnx + offset * 2,
+      depth: mxz - mnz + offset * 2,
+      height: mxy - mny + offset,
+    });
+  }, [mode, offset, foam, update]);
+}
+
 // ── Step 7 ────────────────────────────────────────────────────────────────────
 function Step7Sizing() {
+  useAutoBoxSizing();
   const sizing = useStore((s) => s.boxSizing);
   const update = useStore((s) => s.updateBoxSizing);
   const foam = useStore((s) => s.insertFoam);
@@ -1062,13 +1108,19 @@ const FACE_META: Array<{ key: BoxFace; label: string; view: CameraView; lidOnly?
 ];
 
 function Step8Render() {
+  useAutoBoxSizing();
   const presetId = useStore((s) => s.boxPresetId);
   const saved = useStore((s) => s.savedIllustrations);
   const addSaved = useStore((s) => s.addSavedIllustration);
+  const removeSaved = useStore((s) => s.removeSavedIllustration);
   const faceArt = useStore((s) => s.boxFaceArtwork);
   const setFaceArt = useStore((s) => s.setBoxFaceArtwork);
   const faceXf = useStore((s) => s.boxFaceTransform);
   const setFaceXf = useStore((s) => s.setBoxFaceTransform);
+  const boxTexts = useStore((s) => s.boxTexts);
+  const addBoxText = useStore((s) => s.addBoxText);
+  const updateBoxText = useStore((s) => s.updateBoxText);
+  const removeBoxText = useStore((s) => s.removeBoxText);
   const setCameraView = useStore((s) => s.setCameraView);
   const setSelectedFace = useStore((s) => s.setBoxSelectedFace);
   const boxClosed = useStore((s) => s.boxClosed);
@@ -1160,6 +1212,7 @@ function Step8Render() {
         </>
       )}
 
+      <Collapsible title="일러스트 · 면별 이미지" defaultOpen>
       <div className="list-head" style={{ marginBottom: 6 }}>면 선택</div>
       <div className="seg-row" style={{ flexWrap: "wrap", gap: 4 }}>
         {faces.map((f) => (
@@ -1200,15 +1253,27 @@ function Step8Render() {
           <span className="ill-none">＋ 이미지 업로드</span>
         </button>
         {saved.map((item) => (
-          <button
-            key={item.id}
-            className={"ill-cell" + (assigned === item.id ? " on" : "")}
-            onClick={() => setFaceArt(selFace, item.id)}
-            title={`${item.name} · ${item.view} 뷰`}
-          >
-            <img src={item.thumbnail} alt={item.name} />
-            <span className="ill-name">{item.name}</span>
-          </button>
+          <div key={item.id} style={{ position: "relative" }}>
+            <button
+              className={"ill-cell" + (assigned === item.id ? " on" : "")}
+              style={{ width: "100%" }}
+              onClick={() => setFaceArt(selFace, item.id)}
+              title={`${item.name} · ${item.view} 뷰`}
+            >
+              <img src={item.thumbnail} alt={item.name} />
+              <span className="ill-name">{item.name}</span>
+            </button>
+            <button
+              className="ill-del"
+              title="이 일러스트 삭제"
+              onClick={(e) => {
+                e.stopPropagation();
+                removeSaved(item.id);
+              }}
+            >
+              ×
+            </button>
+          </div>
         ))}
       </div>
       {!saved.length && (
@@ -1324,6 +1389,302 @@ function Step8Render() {
           );
         })}
       </div>
+      </Collapsible>
+
+      <Collapsible title="텍스트 · 면별 글자">
+        <BoxTextEditor
+          faces={faces}
+          texts={boxTexts}
+          add={addBoxText}
+          update={updateBoxText}
+          remove={removeBoxText}
+        />
+      </Collapsible>
+    </div>
+  );
+}
+
+// ── Step 8 — per-face text labels editor (text / font / size / colour + place) ──
+const WEIGHT_LABELS: Record<number, string> = {
+  100: "Thin (100)",
+  200: "ExtraLight (200)",
+  300: "Light (300)",
+  400: "Regular (400)",
+  500: "Medium (500)",
+  600: "SemiBold (600)",
+  700: "Bold (700)",
+  800: "ExtraBold (800)",
+  900: "Black (900)",
+};
+
+const TEXT_FONTS: Array<{ label: string; css: string }> = [
+  { label: "Montserrat", css: '"Montserrat", sans-serif' },
+  { label: "고딕 (Sans)", css: "sans-serif" },
+  { label: "명조 (Serif)", css: "serif" },
+  { label: "모노 (Mono)", css: "monospace" },
+  { label: "Arial", css: "Arial, sans-serif" },
+  { label: "Georgia", css: "Georgia, serif" },
+  { label: "Impact", css: "Impact, sans-serif" },
+];
+
+function BoxTextEditor({
+  faces,
+  texts,
+  add,
+  update,
+  remove,
+}: {
+  faces: Array<{ key: BoxFace; label: string }>;
+  texts: BoxText[];
+  add: (t: BoxText) => void;
+  update: (id: string, patch: Partial<BoxText>) => void;
+  remove: (id: string) => void;
+}) {
+  const [face, setFace] = useState<BoxFace>(faces[0]?.key ?? "front");
+  const boxSizing = useStore((s) => s.boxSizing);
+
+  function addText() {
+    add({
+      id: `txt_${Date.now()}_${Math.floor(Math.random() * 1e4)}`,
+      face,
+      text: "텍스트",
+      font: '"Montserrat", sans-serif', // Montserrat Medium by default
+      sizeMm: 12,
+      x: 0,
+      y: 0,
+      angle: 0,
+      color: "#111111",
+      weight: 500,
+    });
+  }
+
+  // Brand preset: Montserrat 500 white. The front COVER (tuck) + back carry the
+  // fixed brand line centred; the top (lid) gets a manual headline anchored 5 mm
+  // in from the top-left corner. Replaces any existing text on those three faces.
+  const PRESET_FACES: BoxFace[] = ["tuck", "back", "top"];
+  const hasPreset = texts.some((t) => PRESET_FACES.includes(t.face));
+  function applyPreset() {
+    texts
+      .filter((t) => PRESET_FACES.includes(t.face))
+      .forEach((t) => remove(t.id));
+    const font = '"Montserrat", sans-serif';
+    let i = 0;
+    const mk = (extra: Partial<BoxText>): BoxText => ({
+      id: `txt_${Date.now()}_${i++}`,
+      face: "tuck",
+      text: "",
+      font,
+      sizeMm: 13,
+      x: 0,
+      y: 0,
+      angle: 0,
+      color: "#ffffff",
+      weight: 500,
+      anchor: "center",
+      ...extra,
+    });
+    add(mk({ face: "tuck", text: "ORBOTIX INDUSTRIES", sizeMm: 13 }));
+    add(mk({ face: "back", text: "ORBOTIX INDUSTRIES", sizeMm: 13 }));
+    const W = Math.max(1, boxSizing.width);
+    const D = Math.max(1, boxSizing.depth);
+    add(
+      mk({
+        face: "top",
+        text: "BRAND",
+        sizeMm: 21,
+        // The lid face normal points down (we view its back) and its local +X
+        // runs to screen-LEFT while +Y runs toward the front, so mirror both axes
+        // to read upright/forward, and anchor the LOCAL +X,−Y corner — which maps
+        // to the screen TOP-LEFT of the lid — 5 mm in from each edge.
+        anchor: "br",
+        flipX: true,
+        flipY: true,
+        x: 0.5 - 5 / W,
+        y: -0.5 + 5 / D,
+      })
+    );
+    setFace("top"); // jump to the lid so the manual headline can be edited
+  }
+
+  const onFace = texts.filter((t) => t.face === face);
+
+  return (
+    <div>
+      <button className="btn block" onClick={applyPreset}>
+        {hasPreset ? "프리셋 다시 적용" : "프리셋 적용 (브랜드 레이아웃)"}
+      </button>
+      <div className="note" style={{ margin: "6px 0 12px" }}>
+        Montserrat · 굵기 500 · 흰색. 앞 덮개·뒷면 중앙에 “ORBOTIX INDUSTRIES”(크기
+        13), 윗면은 좌상단(≈5mm)에 직접 입력하는 헤드라인(크기 21). (앞 덮개·뒷면·윗면의
+        기존 텍스트는 교체됩니다.)
+      </div>
+
+      <div className="field">
+        <label>텍스트를 넣을 면</label>
+        <select value={face} onChange={(e) => setFace(e.target.value as BoxFace)}>
+          {faces.map((f) => (
+            <option key={f.key} value={f.key}>
+              {f.label}
+              {texts.some((t) => t.face === f.key) ? " ●" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button className="btn block" onClick={addText}>
+        ＋ ‘{faces.find((f) => f.key === face)?.label}’ 면에 텍스트 추가
+      </button>
+
+      {onFace.length === 0 ? (
+        <div className="note" style={{ marginTop: 8 }}>
+          이 면에 추가된 텍스트가 없습니다.
+        </div>
+      ) : (
+        onFace.map((t) => (
+          <BoxTextItem key={t.id} t={t} update={update} remove={remove} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function BoxTextItem({
+  t,
+  update,
+  remove,
+}: {
+  t: BoxText;
+  update: (id: string, patch: Partial<BoxText>) => void;
+  remove: (id: string) => void;
+}) {
+  const NumRow = (
+    label: string,
+    key: "sizeMm" | "x" | "y" | "angle",
+    min: number,
+    max: number,
+    step: number,
+    unit: string
+  ) => (
+    <div className="field" key={key}>
+      <label>{label}</label>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="range"
+          style={{ flex: 1 }}
+          min={min}
+          max={max}
+          step={step}
+          value={t[key]}
+          onChange={(e) =>
+            update(t.id, {
+              [key]: Math.max(min, Math.min(max, Number(e.target.value))),
+            })
+          }
+        />
+        <input
+          type="number"
+          style={{ width: 60 }}
+          min={min}
+          max={max}
+          step={step}
+          value={Number(t[key].toFixed(2))}
+          onChange={(e) =>
+            e.target.value !== "" &&
+            update(t.id, {
+              [key]: Math.max(min, Math.min(max, Number(e.target.value))),
+            })
+          }
+        />
+        <span style={{ color: "var(--text-dim)", width: 14 }}>{unit}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+        padding: 8,
+        marginTop: 8,
+      }}
+    >
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input
+          type="text"
+          style={{ flex: 1 }}
+          value={t.text}
+          placeholder="문구 입력"
+          onChange={(e) => update(t.id, { text: e.target.value })}
+        />
+        <button
+          className="btn secondary"
+          style={{ padding: "2px 8px" }}
+          title="이 텍스트 삭제"
+          onClick={() => remove(t.id)}
+        >
+          ×
+        </button>
+      </div>
+      <div className="row" style={{ marginTop: 8, gap: 8 }}>
+        <div className="field" style={{ flex: 1 }}>
+          <label>폰트</label>
+          <select
+            value={t.font}
+            onChange={(e) => update(t.id, { font: e.target.value })}
+          >
+            {TEXT_FONTS.map((f) => (
+              <option key={f.css} value={f.css}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ width: 64 }}>
+          <label>색</label>
+          <input
+            type="color"
+            style={{ width: "100%", height: 30, padding: 0 }}
+            value={t.color}
+            onChange={(e) => update(t.id, { color: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="field">
+        <label style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>굵기</span>
+          <span style={{ color: "var(--text-dim)" }}>
+            {WEIGHT_LABELS[t.weight] ?? t.weight}
+          </span>
+        </label>
+        <input
+          type="range"
+          min={100}
+          max={900}
+          step={100}
+          value={t.weight}
+          onChange={(e) => update(t.id, { weight: Number(e.target.value) })}
+        />
+      </div>
+      <div className="seg-row" style={{ marginBottom: 8, gap: 4 }}>
+        <button
+          className={"seg-btn" + (t.flipX ? " on" : "")}
+          onClick={() => update(t.id, { flipX: !t.flipX })}
+        >
+          좌우 반전
+        </button>
+        <button
+          className={"seg-btn" + (t.flipY ? " on" : "")}
+          onClick={() => update(t.id, { flipY: !t.flipY })}
+        >
+          상하 반전
+        </button>
+      </div>
+      <Collapsible title="크기 · 위치 · 회전">
+        {NumRow("글자 크기 (mm)", "sizeMm", 2, 80, 0.5, "")}
+        {NumRow("가로 이동", "x", -0.5, 0.5, 0.01, "")}
+        {NumRow("세로 이동", "y", -0.5, 0.5, 0.01, "")}
+        {NumRow("회전", "angle", -180, 180, 1, "°")}
+      </Collapsible>
     </div>
   );
 }
@@ -1409,6 +1770,9 @@ export function Step7LeftOptions() {
   const selectModel = useStore((s) => s.selectModel);
   const setLineArt = useStore((s) => s.setLineArt);
   const setStep7View = useStore((s) => s.setStep7View);
+  const addSaved = useStore((s) => s.addSavedIllustration);
+  const artwork = useStore((s) => s.artwork);
+  const savedCount = useStore((s) => s.savedIllustrations.length);
 
   const targetId = selectedModelId ?? models[0]?.id ?? null;
 
@@ -1426,6 +1790,43 @@ export function Step7LeftOptions() {
     if (!targetId) return;
     if (selectedModelId !== targetId) selectModel(targetId);
     setLineArt(lineArtBridge.capture?.(targetId) ?? null);
+  }
+
+  // Batch-extract one illustration per PRESET face (front/rear/left/right/top) and
+  // save each to the list, ready to drop onto the matching box face in Step 8.
+  const PRESET_VIEWS: Array<{ view: CameraView; label: string }> = [
+    { view: "front", label: "정면" },
+    { view: "top", label: "윗면" },
+    { view: "right", label: "우측" },
+    { view: "left", label: "좌측" },
+  ];
+  function generatePreset() {
+    if (!targetId || !lineArtBridge.captureView) return;
+    if (selectedModelId !== targetId) selectModel(targetId);
+    const preset = getArtworkPreset(artwork.presetId);
+    const bg = artwork.background ?? preset.background;
+    let n = 0;
+    PRESET_VIEWS.forEach(({ view, label }, i) => {
+      const art = lineArtBridge.captureView!(targetId, view);
+      if (!art) return;
+      // The shaded layer is already a ready raster of the product from that face —
+      // use it directly as the thumbnail (avoids async decode); fall back to a
+      // full composite if there is no shaded layer.
+      const shaded = art.layers.find((l) => l.kind === "shaded")?.image;
+      const thumbnail =
+        shaded ?? composeIllustration(art, bg, 320, 240).toDataURL("image/png");
+      addSaved({
+        id: `ill_preset_${Date.now()}_${i}`,
+        name: `${label} 면`,
+        thumbnail,
+        lineArt: art,
+        background: bg,
+        view: label,
+      });
+      n++;
+    });
+    // Show the last captured one in the live preview as feedback.
+    if (n) setLineArt(lineArtBridge.captureView!(targetId, PRESET_VIEWS[0].view));
   }
 
   if (!models.length) {
@@ -1465,6 +1866,20 @@ export function Step7LeftOptions() {
       >
         현재 시점에서 일러스트 추출
       </button>
+      <button
+        className="btn block secondary"
+        style={{ marginTop: 8 }}
+        disabled={!targetId}
+        onClick={generatePreset}
+        title="정면·윗면·우측·좌측 시점에서 한 번에 추출해 목록에 저장"
+      >
+        프리셋 설정에 맞춰 일러스트 추출
+      </button>
+      <div className="note" style={{ marginTop: 6 }}>
+        프리셋 추출은 4개 면(정면·윗면·우측·좌측)을 한 번에 저장합니다. (현재 저장됨:
+        {" "}
+        {savedCount}개)
+      </div>
     </div>
   );
 }

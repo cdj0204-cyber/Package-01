@@ -272,6 +272,33 @@ export interface ArtworkConfig {
   scale: number;
 }
 
+/**
+ * Step 8 — a text label placed on a specific 3D box FACE. Position is a fraction
+ * of the face (0 = centred), size is physical mm, angle in degrees.
+ */
+export interface BoxText {
+  id: string;
+  face: BoxFace;
+  text: string;
+  font: string; // CSS font-family
+  sizeMm: number;
+  x: number; // -0.5..0.5 of face width
+  y: number; // -0.5..0.5 of face height
+  angle: number; // degrees
+  color: string;
+  /** Font weight 100..900 (400 = regular, 500 = medium, 700 = bold). */
+  weight: number;
+  /**
+   * Which point of the text box sits at (x, y). "center" (default) keeps it
+   * centred; "tl" anchors the text's TOP-LEFT corner there, so a corner-margin
+   * placement stays put regardless of how long the text is.
+   */
+  anchor?: "center" | "tl" | "tr" | "bl" | "br";
+  /** Mirror the text horizontally / vertically (in place). */
+  flipX?: boolean;
+  flipY?: boolean;
+}
+
 /** Step 10 — a placed text element on the box surface. */
 export interface TextElement {
   id: string;
@@ -316,6 +343,8 @@ export interface ProjectState {
   boxFaceArtwork: Partial<Record<BoxFace, string>>;
   /** Step 8 — per-face placement of that illustration (gizmo: scale/move/rotate). */
   boxFaceTransform: Partial<Record<BoxFace, FaceArtTransform>>;
+  /** Step 8 — text labels placed on the box faces. */
+  boxTexts: BoxText[];
   artwork: ArtworkConfig;
   textElements: TextElement[];
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
@@ -7,7 +7,7 @@ import { useStore } from "../store/useStore";
 import { lineArtBridge } from "./lineArtBridge";
 import { captureLineArt } from "./lineArtCapture";
 import { composeIllustration } from "./illustrationRender";
-import type { BoxFace, ImportedMesh, PlacedModel } from "../types";
+import type { BoxFace, BoxText, ImportedMesh, PlacedModel } from "../types";
 import { type BoxPose } from "../geometry/boolean";
 import {
   buildExtrudeMesh,
@@ -226,6 +226,66 @@ function buildArtGizmo(
   return { handles, relayout };
 }
 
+/** Build a face-text label mesh: render the text to a transparent canvas and put
+ *  it on a plane sized to its physical mm, placed on the face by its x/y/angle. */
+function buildTextMesh(
+  t: BoxText,
+  m: THREE.Matrix4,
+  fw: number,
+  fh: number
+): THREE.Mesh | null {
+  if (!t.text.trim()) return null;
+  const K = 8; // canvas px per mm (crisp text)
+  const fontPx = Math.max(4, t.sizeMm * K);
+  const fontStr = `${t.weight || 400} ${fontPx}px ${t.font}`;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.font = fontStr;
+  const w = Math.ceil(ctx.measureText(t.text).width + fontPx * 0.6);
+  const h = Math.ceil(fontPx * 1.35);
+  canvas.width = Math.max(2, w);
+  canvas.height = Math.max(2, h);
+  ctx.font = fontStr; // resizing the canvas resets the context
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = t.color;
+  ctx.fillText(t.text, canvas.width / 2, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  const planeW = canvas.width / K;
+  const planeH = canvas.height / K;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(planeW, planeH),
+    new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+  );
+  // Anchor: shift the (centred) plane so the chosen LOCAL corner sits at (x,y).
+  // x: −X is "left", +X "right"; y: +Y is "top", −Y "bottom" (face-local).
+  let px = t.x * fw;
+  let py = t.y * fh;
+  const a = t.anchor ?? "center";
+  if (a === "tl" || a === "bl") px += planeW / 2; // anchor on the −X edge
+  if (a === "tr" || a === "br") px -= planeW / 2; // anchor on the +X edge
+  if (a === "tl" || a === "tr") py -= planeH / 2; // anchor on the +Y edge
+  if (a === "bl" || a === "br") py += planeH / 2; // anchor on the −Y edge
+  const local = new THREE.Matrix4().compose(
+    new THREE.Vector3(px, py, 0.6),
+    new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 0, 1),
+      (t.angle * Math.PI) / 180
+    ),
+    new THREE.Vector3(t.flipX ? -1 : 1, t.flipY ? -1 : 1, 1)
+  );
+  mesh.applyMatrix4(local);
+  mesh.applyMatrix4(m);
+  return mesh;
+}
+
 /** Map contrast 0..1 to ambient + directional intensities. */
 function lightingFor(contrast: number) {
   return {
@@ -412,7 +472,22 @@ export function Viewport3D() {
   const savedIllustrations = useStore((s) => s.savedIllustrations);
   const boxFaceArtwork = useStore((s) => s.boxFaceArtwork);
   const boxFaceTransform = useStore((s) => s.boxFaceTransform);
+  const boxTexts = useStore((s) => s.boxTexts);
   const boxSelectedFace = useStore((s) => s.boxSelectedFace);
+  // Bumped once web fonts (Montserrat) finish loading, so face-text canvases
+  // re-render with the real font instead of a fallback.
+  const [fontsReady, setFontsReady] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const f = (document as Document & { fonts?: { ready?: Promise<unknown> } })
+      .fonts;
+    f?.ready?.then(() => {
+      if (alive) setFontsReady((v) => v + 1);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
   const boxClosed = useStore((s) => s.boxClosed);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
@@ -421,13 +496,15 @@ export function Viewport3D() {
   // Raw product models: Step 1-2 placement, and Step 7 "product" mode (viewing
   // the product to extract its line drawing). Step 7 "box" mode shows the box
   // with the illustration applied instead.
-  // Step 8 shows the whole package assembled — imported product + insert foam +
-  // box together — so the model + foam are visible there too.
+  // The box-design stages (5 box type, 6 sizing, 8 render) show the whole package
+  // assembled — imported product + insert foam + box together — so you can judge
+  // the fit from the moment you pick a box type.
+  const showAssembly = step >= 5 && step <= 8 && step !== 7;
+  // Step 3 also shows the imported product (as a faint ghost) so you can gauge how
+  // large the foam must be to contain it.
   const showModel =
-    step <= 2 || (step === 7 && step7View === "product") || step === 8;
-  const boxVisible =
-    (step >= 5 && step <= 8 && step !== 7) ||
-    (step === 7 && step7View === "box");
+    step <= 3 || (step === 7 && step7View === "product") || showAssembly;
+  const boxVisible = showAssembly || (step === 7 && step7View === "box");
 
   // ── one-time scene setup ────────────────────────────────────────────────────
   useEffect(() => {
@@ -976,8 +1053,48 @@ export function Viewport3D() {
         activeCamRef.current,
         mountRef.current
       );
+    // Preset capture: build a throwaway orthographic camera framed on the model
+    // from the requested face and project through it (live camera untouched).
+    lineArtBridge.captureView = (modelId, view) => {
+      const grp = modelGroupsRef.current.get(modelId);
+      const mount = mountRef.current;
+      if (!grp || !mount) return null;
+      const { center, radius } = combinedBox(modelsLiveRef.current);
+      const vd = VIEW_DIRS[view] ?? VIEW_DIRS.perspective;
+      const a = (mount.clientWidth || 1) / (mount.clientHeight || 1);
+      const viewSize = Math.max(40, radius * 1.25);
+      const cam = new THREE.OrthographicCamera(
+        -viewSize * a,
+        viewSize * a,
+        viewSize,
+        -viewSize,
+        0.1,
+        radius * 40 + 20000
+      );
+      const len = Math.hypot(vd.dir[0], vd.dir[1], vd.dir[2]) || 1;
+      const dist = radius * 6 + 2000;
+      cam.up.set(vd.up[0], vd.up[1], vd.up[2]);
+      cam.position.set(
+        center[0] + (vd.dir[0] / len) * dist,
+        center[1] + (vd.dir[1] / len) * dist,
+        center[2] + (vd.dir[2] / len) * dist
+      );
+      cam.lookAt(center[0], center[1], center[2]);
+      cam.updateMatrixWorld(true);
+      cam.updateProjectionMatrix();
+      return captureLineArt(
+        modelId,
+        rendererRef.current,
+        sceneRef.current,
+        modelsRootRef.current,
+        grp,
+        cam,
+        mount
+      );
+    };
     return () => {
       lineArtBridge.capture = null;
+      lineArtBridge.captureView = null;
     };
   }, []);
 
@@ -1111,11 +1228,20 @@ export function Viewport3D() {
       tc.detach();
     }
 
+    // In Step 3 the product is a faint reference ghost under the box form; keep
+    // it solid everywhere else.
+    const ghost = step === 3;
     for (const [id, g] of map.entries()) {
-      const on = id === selectedModelId && showModel;
+      const on = id === selectedModelId && showModel && !ghost;
       for (const mat of g.mats) {
         mat.emissive.setHex(on ? 0x4a3000 : 0x000000);
         mat.emissiveIntensity = on ? 1 : 0;
+        if (mat.transparent !== ghost || mat.opacity !== (ghost ? 0.7 : 1)) {
+          mat.transparent = ghost;
+          mat.opacity = ghost ? 0.7 : 1;
+          mat.depthWrite = !ghost;
+          mat.needsUpdate = true;
+        }
       }
     }
   }, [
@@ -1200,8 +1326,9 @@ export function Viewport3D() {
 
     // Step 4 / 10 — the boolean result (insert foam). Rendered as an OPAQUE
     // shaded solid with edge lines (CAD "shaded + edges" look) so the cut cavity
-    // reads clearly as a recess. Step 8 also shows it (assembled package view).
-    if ((step === 4 || step === 10 || step === 8) && insertFoam.mesh) {
+    // reads clearly as a recess. The box-design stages also show it (assembled
+    // package view).
+    if ((step === 4 || step === 10 || showAssembly) && insertFoam.mesh) {
       const foam = toThreeMesh(insertFoam.mesh, 1, true);
       const fmat = foam.material as THREE.MeshStandardMaterial;
       fmat.color.setHex(0x9aa3ad);
@@ -1244,24 +1371,40 @@ export function Viewport3D() {
       const { width: bw, depth: bd, height: bh } = boxSizing;
       const model = buildBoxModel(kind, bw, bd, bh, boxLidSide, fold);
       const group = new THREE.Group();
-      // Step 8 assembles the package: drop the box so its floor sits on the same
-      // plane as the foam/product (their min Y), so the insert + product nest
-      // inside it. Other steps keep the box on the ground (y=0).
-      let baseY = 0;
-      if (step === 8 && models.length) {
-        let minY = Infinity;
-        for (const pm of models)
-          minY = Math.min(minY, pm.model.bbox.min[1] + pm.transform.position[1]);
-        if (isFinite(minY)) baseY = minY;
+      // Assembled package view: wrap the box around the ACTUAL insert foam —
+      // centre it on the foam's X/Z and floor it at the foam's min Y — so the
+      // foam (and the product nested in it) sits inside the box. Other steps keep
+      // the box on the ground centred on the models.
+      let bx = center[0],
+        bz = center[1],
+        baseY = 0;
+      if (showAssembly && insertFoam.mesh) {
+        const p = insertFoam.mesh.positions;
+        let mnx = Infinity,
+          mny = Infinity,
+          mnz = Infinity,
+          mxx = -Infinity,
+          mxz = -Infinity;
+        for (let i = 0; i < p.length; i += 3) {
+          const x = p[i],
+            y = p[i + 1],
+            z = p[i + 2];
+          if (x < mnx) mnx = x;
+          if (y < mny) mny = y;
+          if (z < mnz) mnz = z;
+          if (x > mxx) mxx = x;
+          if (z > mxz) mxz = z;
+        }
+        if (isFinite(mnx)) {
+          bx = (mnx + mxx) / 2;
+          bz = (mnz + mxz) / 2;
+          baseY = mny;
+        }
       }
-      group.position.set(center[0], baseY, center[1]);
+      group.position.set(bx, baseY, bz);
       // World matrix of the group's origin offset (for the gizmo's world-space
       // face plane / hit→UV maths, since artwork planes live under this group).
-      const groupWorld = new THREE.Matrix4().makeTranslation(
-        center[0],
-        baseY,
-        center[1]
-      );
+      const groupWorld = new THREE.Matrix4().makeTranslation(bx, baseY, bz);
 
       const t = 3; // board thickness 3 mm (side walls doubled to 6 mm below)
       const face: [number, number, number] = model.color;
@@ -1448,6 +1591,15 @@ export function Viewport3D() {
         }
       }
 
+      // Text labels placed on the box faces (Step 8).
+      for (const tx of boxTexts) {
+        if (tx.face === "front" && fold > 0.5) continue; // hidden once closed
+        const placement = facePlacement(tx.face);
+        if (!placement) continue;
+        const mesh = buildTextMesh(tx, placement.m, placement.fw, placement.fh);
+        if (mesh) group.add(mesh);
+      }
+
       return group;
     };
 
@@ -1466,7 +1618,7 @@ export function Viewport3D() {
             if (boxGroup) content.add(boxGroup);
           }
         : null;
-  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork, boxFaceTransform, boxSelectedFace]);
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork, boxFaceTransform, boxTexts, boxSelectedFace, fontsReady]);
 
   // ── Step 8: animate the G-type lid open ⇄ closed when the toggle flips ─────────
   useEffect(() => {
