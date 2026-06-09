@@ -44,16 +44,22 @@ function getOcct(): Promise<any> {
 }
 
 /**
- * Tessellation quality for display. We keep the original NURBS surface curvature
- * smooth by triangulating finely (curvature-adaptive), so the model *looks* like
- * the true B-rep surface even though WebGL ultimately rasterizes triangles —
- * the same thing a Rhino viewport does. The B-rep itself is not retained here;
- * precise NURBS booleans/draft (step 4) will introduce opencascade.js where needed.
+ * Tessellation quality for display. We triangulate finely (curvature-adaptive) so
+ * the model *looks* like the true B-rep surface even though WebGL rasterizes
+ * triangles — the same thing a Rhino/Fusion viewport does.
  *
- * - `bounding_box_ratio`: chord error as a fraction of the model's bbox, so the
- *   tessellation scales with the part regardless of its absolute size in mm.
- * - `angularDeflection` (radians): caps the angle between adjacent facets, which
- *   is what actually makes curved surfaces read as smooth.
+ * IMPORTANT — why ABSOLUTE, not bounding-box-ratio: a ratio ties the chord error
+ * to the WHOLE part's bounding box, so on a big model (e.g. a 300 mm drone frame)
+ * even a 0.001 ratio is ~0.3 mm — larger than the part's thin ribs and small
+ * holes, which then collapse into mangled facets. An absolute chord error keeps
+ * every small feature crisp regardless of overall size; flat/shallow faces stay
+ * cheap (low curvature ⇒ few triangles even at a tight tolerance), so the count
+ * doesn't explode.
+ *
+ * - `linearDeflection` (absolute, mm): max chord error of a facet from the true
+ *   surface. 0.05 mm is well below visual perception.
+ * - `angularDeflection` (rad): caps the angle between adjacent facets — what makes
+ *   tight cylinders/fillets read as smooth. 0.1 rad ≈ 5.7°.
  */
 export interface TessellationQuality {
   linearDeflectionType: "bounding_box_ratio" | "absolute_value";
@@ -61,11 +67,11 @@ export interface TessellationQuality {
   angularDeflection: number;
 }
 
-/** Smooth default: fine chord error + ~11.5° facet cap. */
+/** Smooth default: 0.05 mm absolute chord error + ~5.7° facet cap. */
 export const SMOOTH_TESSELLATION: TessellationQuality = {
-  linearDeflectionType: "bounding_box_ratio",
-  linearDeflection: 0.001,
-  angularDeflection: 0.2,
+  linearDeflectionType: "absolute_value",
+  linearDeflection: 0.05,
+  angularDeflection: 0.1,
 };
 
 export async function importStepFile(

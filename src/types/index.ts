@@ -147,6 +147,30 @@ export type BoxFace = "front" | "back" | "left" | "right" | "top" | "tuck";
 
 export const BOX_FACES: BoxFace[] = ["front", "back", "left", "right", "top", "tuck"];
 
+/**
+ * Step 8 — placement of an illustration on a box face (the on-face gizmo state).
+ * `scale` 1 = fits the face; `x`/`y` are offsets as a fraction of the face W/H
+ * (0 = centred); `angle` is the in-plane rotation in degrees.
+ */
+export interface FaceArtTransform {
+  scale: number;
+  x: number;
+  y: number;
+  angle: number;
+  /** Mirror the image horizontally / vertically on the face. */
+  flipX: boolean;
+  flipY: boolean;
+}
+
+export const DEFAULT_FACE_ART_TRANSFORM: FaceArtTransform = {
+  scale: 1,
+  x: 0,
+  y: 0,
+  angle: 0,
+  flipX: false,
+  flipY: false,
+};
+
 export type DielineKind =
   | "g-type"
   | "tuck-end-rte"
@@ -290,6 +314,8 @@ export interface ProjectState {
   savedIllustrations: SavedIllustration[];
   /** Step 8 — which saved illustration (id) is applied to each box face. */
   boxFaceArtwork: Partial<Record<BoxFace, string>>;
+  /** Step 8 — per-face placement of that illustration (gizmo: scale/move/rotate). */
+  boxFaceTransform: Partial<Record<BoxFace, FaceArtTransform>>;
   artwork: ArtworkConfig;
   textElements: TextElement[];
 }

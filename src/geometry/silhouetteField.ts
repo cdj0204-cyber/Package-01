@@ -511,13 +511,59 @@ function signedArea(loop: Array<[number, number]>): number {
   return a / 2;
 }
 
+/** Even-odd point-in-polygon test (ray cast). */
+function pointInPoly(p: [number, number], poly: Array<[number, number]>): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0],
+      yi = poly[i][1];
+    const xj = poly[j][0],
+      yj = poly[j][1];
+    if (
+      yi > p[1] !== yj > p[1] &&
+      p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi
+    )
+      inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Keep only TOP-LEVEL outer boundary loops, dropping holes (any loop nested
+ * inside a larger one). An imported part's internal openings — e.g. a drone
+ * frame's lattice windows or motor-mount bores — show up as hole loops in the
+ * iso-contour; for an insert-foam pocket we want the FILLED outer profile, so
+ * those interior loops are discarded. Disconnected outer parts are all kept.
+ */
+export function outerLoopsOnly(
+  loops: Array<Array<[number, number]>>
+): Array<Array<[number, number]>> {
+  if (loops.length <= 1) return loops;
+  const areas = loops.map((l) => Math.abs(signedArea(l)));
+  const keep: Array<Array<[number, number]>> = [];
+  for (let i = 0; i < loops.length; i++) {
+    const probe = loops[i][0];
+    let nested = false;
+    for (let j = 0; j < loops.length; j++) {
+      if (i === j || areas[j] <= areas[i]) continue; // only a bigger loop can enclose i
+      if (pointInPoly(probe, loops[j])) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) keep.push(loops[i]);
+  }
+  return keep.length ? keep : loops;
+}
+
 // ── Build an extruded (optionally drafted) solid from the offset outline ──────
 //
 // The base face is the silhouette at `offset`. With a draft angle the top face
 // is the silhouette at a *different* iso-level (offset − tan(angle)·depth), so
 // the wall is the linear loft between the two real silhouette contours — the
 // draft therefore follows the true outline at every height, not a radial scale.
-// Holes taper correctly too (they are just other contour loops).
+// Internal holes are ignored (outer profile only) so the insert-foam solid is a
+// filled block, not one pierced by the product's openings.
 export function buildExtrudeMesh(
   sil: ModelSilhouette,
   color: [number, number, number] = [0.3, 0.55, 1]
@@ -538,9 +584,9 @@ export function buildExtrudeMesh(
   if (topIso < minIso) topIso = minIso;
   if (topIso > field.pad) topIso = field.pad;
 
-  const baseLoops = contourAt(field, sil.offset);
+  const baseLoops = outerLoopsOnly(contourAt(field, sil.offset));
   if (!baseLoops.length) return null;
-  const topLoops = contourAt(field, topIso);
+  const topLoops = outerLoopsOnly(contourAt(field, topIso));
 
   const positions: number[] = [];
   const indices: number[] = [];
@@ -706,8 +752,8 @@ export function extrudeCapLoops(sil: ModelSilhouette): {
   ): Array<Array<[number, number, number]>> =>
     loops.map((l) => l.map((p) => uvToWorld(p[0], p[1], depth, view)));
   return {
-    base: toWorld(contourAt(field, sil.offset), baseDepth),
-    top: toWorld(contourAt(field, draftTopIso(sil)), topDepth),
+    base: toWorld(outerLoopsOnly(contourAt(field, sil.offset)), baseDepth),
+    top: toWorld(outerLoopsOnly(contourAt(field, draftTopIso(sil))), topDepth),
   };
 }
 

@@ -13,6 +13,7 @@ import {
   buildExtrudeMesh,
   contourAt,
   extrudeCapLoops,
+  outerLoopsOnly,
   solidsPlacement,
   uvToWorld,
 } from "../geometry/silhouetteField";
@@ -118,6 +119,111 @@ function creaseEdgesGeometry(
   }
   out.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
   return out;
+}
+
+type ArtXf = {
+  scale: number;
+  x: number;
+  y: number;
+  angle: number;
+  flipX: boolean;
+  flipY: boolean;
+};
+const DEFAULT_ART_XF: ArtXf = {
+  scale: 1,
+  x: 0,
+  y: 0,
+  angle: 0,
+  flipX: false,
+  flipY: false,
+};
+
+/** Set a face-artwork plane's matrix from its on-face transform (scale/move/rot).
+ *  `m` is the face-local→world placement; the plane geometry is the base fw×fh. */
+function applyArtMatrix(
+  mesh: THREE.Mesh,
+  m: THREE.Matrix4,
+  t: ArtXf | undefined,
+  fw: number,
+  fh: number
+) {
+  const s = t ? Math.max(0.05, t.scale) : 1;
+  const ang = t ? (t.angle * Math.PI) / 180 : 0;
+  const sx = s * (t && t.flipX ? -1 : 1); // horizontal mirror
+  const sy = s * (t && t.flipY ? -1 : 1); // vertical mirror
+  const local = new THREE.Matrix4().compose(
+    new THREE.Vector3(t ? t.x * fw : 0, t ? t.y * fh : 0, 0),
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), ang),
+    new THREE.Vector3(sx, sy, 1)
+  );
+  mesh.matrixAutoUpdate = false;
+  mesh.matrix.copy(m).multiply(local);
+  mesh.matrixWorldNeedsUpdate = true;
+}
+
+/**
+ * Build the on-face artwork gizmo for the face at placement `m` (size fw×fh):
+ * 4 orange MOVE arrows, 4 cyan SCALE corners, 1 green ROTATE knob. Returns the
+ * handle meshes plus a `relayout(t)` that repositions them for a transform — so
+ * the gizmo follows the artwork live while dragging without a store round-trip.
+ */
+function buildArtGizmo(
+  m: THREE.Matrix4,
+  fw: number,
+  fh: number
+): { handles: THREE.Mesh[]; relayout: (t: ArtXf) => void } {
+  const hs = Math.max(2.5, Math.min(fw, fh) * 0.05);
+  const mk = (geo: THREE.BufferGeometry, color: number, gizmo: string) => {
+    const mesh = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({ color, depthTest: false })
+    );
+    mesh.renderOrder = 14;
+    mesh.userData.gizmo = gizmo;
+    return mesh;
+  };
+  const dirs: Array<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const arrows = dirs.map(() =>
+    mk(new THREE.ConeGeometry(hs * 0.95, hs * 2.6, 18), 0xf0883e, "move")
+  );
+  const corn: Array<[number, number]> = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+  const corners = corn.map(() =>
+    mk(new THREE.BoxGeometry(hs * 1.7, hs * 1.7, hs * 1.7), 0x4fc3f7, "scale")
+  );
+  const rotate = mk(new THREE.SphereGeometry(hs * 1.1, 18, 12), 0x66bb6a, "rotate");
+  const handles = [...arrows, ...corners, rotate];
+  const relayout = (t: ArtXf) => {
+    const s = Math.max(0.05, t.scale);
+    const ang = (t.angle * Math.PI) / 180;
+    const ca = Math.cos(ang),
+      sa = Math.sin(ang);
+    const cx = t.x * fw,
+      cy = t.y * fh;
+    const halfX = (fw * s) / 2,
+      halfY = (fh * s) / 2;
+    const rot = (vx: number, vy: number): [number, number] => [
+      vx * ca - vy * sa,
+      vx * sa + vy * ca,
+    ];
+    const place = (lx: number, ly: number) =>
+      new THREE.Vector3(cx + lx, cy + ly, 0.8).applyMatrix4(m);
+    arrows.forEach((a, i) => {
+      const [dx, dy] = dirs[i];
+      const [ox, oy] = rot(dx * (halfX + hs * 2.6), dy * (halfY + hs * 2.6));
+      a.position.copy(place(ox, oy));
+      const [wx, wy] = rot(dx, dy);
+      const wd = new THREE.Vector3(wx, wy, 0).transformDirection(m).normalize();
+      a.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), wd);
+    });
+    corners.forEach((c, i) => {
+      const [sx, sy] = corn[i];
+      const [ox, oy] = rot(sx * halfX, sy * halfY);
+      c.position.copy(place(ox, oy));
+    });
+    const [rx, ry] = rot(0, halfY + hs * 4.5);
+    rotate.position.copy(place(rx, ry));
+  };
+  return { handles, relayout };
 }
 
 /** Map contrast 0..1 to ambient + directional intensities. */
@@ -258,6 +364,27 @@ export function Viewport3D() {
   // Latest step + box edit mode for the (one-time) pointer handlers.
   const stepRef = useRef(1);
   const boxModeRef = useRef<"resize" | "move" | "rotate">("resize");
+  // Step-8 on-face artwork gizmo: handle meshes + the face frame for hit→UV maths.
+  const artGizmoRef = useRef<{
+    handles: THREE.Mesh[];
+    faceKey: BoxFace;
+    m: THREE.Matrix4; // face-local → world
+    mInv: THREE.Matrix4; // world → face-local
+    plane: THREE.Plane; // the face plane, in world space
+    fw: number;
+    fh: number;
+    planeMesh: THREE.Mesh; // the artwork plane (updated live during drag)
+    relayout: (t: ArtXf) => void; // reposition handles for a transform
+  } | null>(null);
+  const artDragRef = useRef<{
+    mode: "move" | "scale" | "rotate";
+    t0: ArtXf;
+    live: ArtXf;
+    centerLocal: THREE.Vector2; // artwork centre in face-local mm
+    grab: THREE.Vector2; // grab point in face-local mm
+    d0: number; // |grab − centre| for scale
+    a0: number; // atan2 of (grab − centre) for rotate
+  } | null>(null);
   // Lid-fold animation: current fold (0 open → 1 closed) + a box-rebuild hook.
   const foldRef = useRef(useStore.getState().boxClosed ? 1 : 0);
   const boxRebuildRef = useRef<((fold: number) => void) | null>(null);
@@ -284,6 +411,8 @@ export function Viewport3D() {
   const step7View = useStore((s) => s.step7View);
   const savedIllustrations = useStore((s) => s.savedIllustrations);
   const boxFaceArtwork = useStore((s) => s.boxFaceArtwork);
+  const boxFaceTransform = useStore((s) => s.boxFaceTransform);
+  const boxSelectedFace = useStore((s) => s.boxSelectedFace);
   const boxClosed = useStore((s) => s.boxClosed);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
@@ -292,7 +421,10 @@ export function Viewport3D() {
   // Raw product models: Step 1-2 placement, and Step 7 "product" mode (viewing
   // the product to extract its line drawing). Step 7 "box" mode shows the box
   // with the illustration applied instead.
-  const showModel = step <= 2 || (step === 7 && step7View === "product");
+  // Step 8 shows the whole package assembled — imported product + insert foam +
+  // box together — so the model + foam are visible there too.
+  const showModel =
+    step <= 2 || (step === 7 && step7View === "product") || step === 8;
   const boxVisible =
     (step >= 5 && step <= 8 && step !== 7) ||
     (step === 7 && step7View === "box");
@@ -512,10 +644,86 @@ export function Viewport3D() {
           return;
         }
       }
+      // Step-8: grab an on-face artwork gizmo handle (move / scale / rotate).
+      if (stepRef.current === 8 && artGizmoRef.current) {
+        setPointer(e);
+        const ag = artGizmoRef.current;
+        const hits = raycaster.intersectObjects(ag.handles, false);
+        if (hits.length) {
+          const mode = hits[0].object.userData.gizmo as
+            | "move"
+            | "scale"
+            | "rotate";
+          const t0 =
+            useStore.getState().boxFaceTransform[ag.faceKey] ?? DEFAULT_ART_XF;
+          const hitW = new THREE.Vector3();
+          if (raycaster.ray.intersectPlane(ag.plane, hitW)) {
+            const gl = hitW.applyMatrix4(ag.mInv);
+            const centerLocal = new THREE.Vector2(t0.x * ag.fw, t0.y * ag.fh);
+            const grab = new THREE.Vector2(gl.x, gl.y);
+            artDragRef.current = {
+              mode,
+              t0: { ...t0 },
+              live: { ...t0 },
+              centerLocal,
+              grab,
+              d0: Math.max(1e-3, grab.distanceTo(centerLocal)),
+              a0: Math.atan2(grab.y - centerLocal.y, grab.x - centerLocal.x),
+            };
+            orbit.enabled = false;
+            draggingRef.current = true;
+            down = null;
+            return;
+          }
+        }
+      }
+
       down = { x: e.clientX, y: e.clientY, gizmo: (tc as any).axis != null };
     };
 
+    const clampN = (v: number, lo: number, hi: number) =>
+      Math.max(lo, Math.min(hi, v));
+
     const onPointerMove = (e: PointerEvent) => {
+      // Step-8: drag an artwork gizmo handle — update plane + handles live.
+      const ad = artDragRef.current;
+      const ag = artGizmoRef.current;
+      if (ad && ag) {
+        setPointer(e);
+        const hitW = new THREE.Vector3();
+        if (!raycaster.ray.intersectPlane(ag.plane, hitW)) return;
+        const hl = hitW.applyMatrix4(ag.mInv);
+        const next: ArtXf = { ...ad.t0 };
+        if (ad.mode === "move") {
+          next.x = clampN(
+            (ad.t0.x * ag.fw + (hl.x - ad.grab.x)) / ag.fw,
+            -1,
+            1
+          );
+          next.y = clampN(
+            (ad.t0.y * ag.fh + (hl.y - ad.grab.y)) / ag.fh,
+            -1,
+            1
+          );
+        } else if (ad.mode === "scale") {
+          const d = Math.hypot(hl.x - ad.centerLocal.x, hl.y - ad.centerLocal.y);
+          next.scale = clampN((ad.t0.scale * d) / ad.d0, 0.1, 5);
+        } else {
+          const a = Math.atan2(
+            hl.y - ad.centerLocal.y,
+            hl.x - ad.centerLocal.x
+          );
+          let deg = ad.t0.angle + ((a - ad.a0) * 180) / Math.PI;
+          while (deg > 180) deg -= 360;
+          while (deg < -180) deg += 360;
+          next.angle = deg;
+        }
+        ad.live = next;
+        applyArtMatrix(ag.planeMesh, ag.m, next, ag.fw, ag.fh);
+        ag.relayout(next);
+        return;
+      }
+
       const fd = faceDragRef.current;
       if (!fd || !fd.active) return;
       setPointer(e);
@@ -538,6 +746,17 @@ export function Viewport3D() {
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      // Finish an artwork gizmo drag → commit the transform to the store.
+      const ad = artDragRef.current;
+      if (ad) {
+        const ag = artGizmoRef.current;
+        artDragRef.current = null;
+        draggingRef.current = false;
+        orbit.enabled = true;
+        if (ag) useStore.getState().setBoxFaceTransform(ag.faceKey, ad.live);
+        return;
+      }
+
       // Finish a face-resize drag → commit dims + pose.
       const fd = faceDragRef.current;
       if (fd && fd.active) {
@@ -929,8 +1148,9 @@ export function Viewport3D() {
       const base = sil.field.depthBase;
 
       if (step === 2) {
-        // Offset outline as world-space line loops at the base plane.
-        const loops = contourAt(sil.field, sil.offset);
+        // Offset outline as world-space line loops at the base plane (outer
+        // profile only — internal holes are ignored for the insert-foam solid).
+        const loops = outerLoopsOnly(contourAt(sil.field, sil.offset));
         const lineColor = selected ? 0xf0883e : 0x6fa8ff;
         for (const loop of loops) {
           if (loop.length < 2) continue;
@@ -978,10 +1198,10 @@ export function Viewport3D() {
     const center = combinedCenterXY(models);
     const showBox = boxVisible;
 
-    // Step 4 / 11 — the boolean result (insert foam). Rendered as an OPAQUE
+    // Step 4 / 10 — the boolean result (insert foam). Rendered as an OPAQUE
     // shaded solid with edge lines (CAD "shaded + edges" look) so the cut cavity
-    // reads clearly as a recess — no transparency to wash the form out.
-    if ((step === 4 || step === 10) && insertFoam.mesh) {
+    // reads clearly as a recess. Step 8 also shows it (assembled package view).
+    if ((step === 4 || step === 10 || step === 8) && insertFoam.mesh) {
       const foam = toThreeMesh(insertFoam.mesh, 1, true);
       const fmat = foam.material as THREE.MeshStandardMaterial;
       fmat.color.setHex(0x9aa3ad);
@@ -1024,7 +1244,24 @@ export function Viewport3D() {
       const { width: bw, depth: bd, height: bh } = boxSizing;
       const model = buildBoxModel(kind, bw, bd, bh, boxLidSide, fold);
       const group = new THREE.Group();
-      group.position.set(center[0], 0, center[1]);
+      // Step 8 assembles the package: drop the box so its floor sits on the same
+      // plane as the foam/product (their min Y), so the insert + product nest
+      // inside it. Other steps keep the box on the ground (y=0).
+      let baseY = 0;
+      if (step === 8 && models.length) {
+        let minY = Infinity;
+        for (const pm of models)
+          minY = Math.min(minY, pm.model.bbox.min[1] + pm.transform.position[1]);
+        if (isFinite(minY)) baseY = minY;
+      }
+      group.position.set(center[0], baseY, center[1]);
+      // World matrix of the group's origin offset (for the gizmo's world-space
+      // face plane / hit→UV maths, since artwork planes live under this group).
+      const groupWorld = new THREE.Matrix4().makeTranslation(
+        center[0],
+        baseY,
+        center[1]
+      );
 
       const t = 3; // board thickness 3 mm (side walls doubled to 6 mm below)
       const face: [number, number, number] = model.color;
@@ -1149,6 +1386,7 @@ export function Viewport3D() {
         return { fw: def.size[0], fh: def.size[1], m };
       };
 
+      artGizmoRef.current = null; // rebuilt below for the selected face (step 8)
       for (const faceKey of Object.keys(boxFaceArtwork) as BoxFace[]) {
         // The front face is covered by the tuck flap once closing past halfway, so
         // hide its illustration there (the tuck face carries the closed-front art).
@@ -1167,16 +1405,47 @@ export function Viewport3D() {
         });
         tex = new THREE.CanvasTexture(canvas);
         tex.needsUpdate = true;
+        // On-face transform (scale/move/rotate) baked into the plane's matrix.
+        const t = boxFaceTransform[faceKey];
         const plane = new THREE.Mesh(
           new THREE.PlaneGeometry(fw, fh),
           new THREE.MeshBasicMaterial({
             map: tex,
             side: THREE.DoubleSide,
             depthWrite: false,
+            // Honour the texture's alpha so transparent-PNG uploads (empty
+            // background) reveal the box surface; opaque Step-7 illustrations
+            // (filled background) are unaffected.
+            transparent: true,
           })
         );
-        plane.applyMatrix4(m);
+        applyArtMatrix(plane, m, t, fw, fh);
         group.add(plane);
+
+        // Step-8: draw the interactive gizmo on the selected face's artwork.
+        if (step === 8 && faceKey === boxSelectedFace) {
+          const giz = buildArtGizmo(m, fw, fh);
+          giz.relayout(t ?? DEFAULT_ART_XF);
+          for (const h of giz.handles) group.add(h);
+          // Handles + artwork plane live UNDER `group` (offset by groupWorld), so
+          // the raycast plane and world→face-local maths must include that offset.
+          const worldM = groupWorld.clone().multiply(m);
+          const origin = new THREE.Vector3().applyMatrix4(worldM);
+          const nWorld = new THREE.Vector3(0, 0, 1)
+            .transformDirection(worldM)
+            .normalize();
+          artGizmoRef.current = {
+            handles: giz.handles,
+            faceKey,
+            m, // local (for relayout / applyArtMatrix under the group)
+            mInv: worldM.clone().invert(), // world → face-local
+            plane: new THREE.Plane().setFromNormalAndCoplanarPoint(nWorld, origin),
+            fw,
+            fh,
+            planeMesh: plane,
+            relayout: giz.relayout,
+          };
+        }
       }
 
       return group;
@@ -1197,7 +1466,7 @@ export function Viewport3D() {
             if (boxGroup) content.add(boxGroup);
           }
         : null;
-  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork]);
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork, boxFaceTransform, boxSelectedFace]);
 
   // ── Step 8: animate the G-type lid open ⇄ closed when the toggle flips ─────────
   useEffect(() => {

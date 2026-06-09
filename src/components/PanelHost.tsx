@@ -1064,12 +1064,61 @@ const FACE_META: Array<{ key: BoxFace; label: string; view: CameraView; lidOnly?
 function Step8Render() {
   const presetId = useStore((s) => s.boxPresetId);
   const saved = useStore((s) => s.savedIllustrations);
+  const addSaved = useStore((s) => s.addSavedIllustration);
   const faceArt = useStore((s) => s.boxFaceArtwork);
   const setFaceArt = useStore((s) => s.setBoxFaceArtwork);
+  const faceXf = useStore((s) => s.boxFaceTransform);
+  const setFaceXf = useStore((s) => s.setBoxFaceTransform);
   const setCameraView = useStore((s) => s.setCameraView);
+  const setSelectedFace = useStore((s) => s.setBoxSelectedFace);
   const boxClosed = useStore((s) => s.boxClosed);
   const setBoxClosed = useStore((s) => s.setBoxClosed);
   const [selFace, setSelFace] = useState<BoxFace>("front");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // Mirror the selected face to the store so the 3D viewport draws the on-face
+  // gizmo on it; clear it when leaving this step.
+  useEffect(() => {
+    setSelectedFace(selFace);
+    return () => setSelectedFace(null);
+  }, [selFace, setSelectedFace]);
+
+  // Upload a custom image as an illustration: wrap it as a single shaded layer so
+  // it composites/renders onto the box face exactly like a Step-7 illustration,
+  // then auto-assign it to the selected face.
+  function onUploadImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const img = new Image();
+      img.onload = () => {
+        const aspect = img.naturalWidth / img.naturalHeight || 1;
+        const id = `upload-${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+        const lineArt: LineArt = {
+          bbox: { min: [0, 0], max: [1, 1] },
+          aspect,
+          layers: [{ kind: "shaded", enabled: true, opacity: 1, image: dataUrl }],
+        };
+        addSaved({
+          id,
+          name: file.name.replace(/\.[^.]+$/, "").slice(0, 24) || "업로드 이미지",
+          thumbnail: dataUrl,
+          lineArt,
+          // Empty background → composeIllustration uses a TRANSPARENT canvas, so a
+          // PNG's transparent pixels let the box surface show through (only the
+          // opaque artwork is applied to the face).
+          background: "",
+          view: "업로드",
+        });
+        setFaceArt(selFace, id);
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  }
 
   if (!presetId) {
     return <div className="note warn">박스 유형을 먼저 선택하세요 (Step 5).</div>;
@@ -1129,31 +1178,137 @@ function Step8Render() {
       <div className="list-head" style={{ margin: "14px 0 6px" }}>
         ‘{selMeta.label}’ 면에 적용할 일러스트
       </div>
-      {!saved.length ? (
-        <div className="note warn">
-          저장된 일러스트가 없습니다. Step 7에서 먼저 렌더링을 저장하세요.
-        </div>
-      ) : (
-        <div className="ill-grid">
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onUploadImage}
+      />
+      <div className="ill-grid">
+        <button
+          className={"ill-cell" + (!assigned ? " on" : "")}
+          onClick={() => setFaceArt(selFace, null)}
+        >
+          <span className="ill-none">비우기</span>
+        </button>
+        <button
+          className="ill-cell"
+          onClick={() => fileRef.current?.click()}
+          title="내 이미지를 일러스트로 업로드"
+        >
+          <span className="ill-none">＋ 이미지 업로드</span>
+        </button>
+        {saved.map((item) => (
           <button
-            className={"ill-cell" + (!assigned ? " on" : "")}
-            onClick={() => setFaceArt(selFace, null)}
+            key={item.id}
+            className={"ill-cell" + (assigned === item.id ? " on" : "")}
+            onClick={() => setFaceArt(selFace, item.id)}
+            title={`${item.name} · ${item.view} 뷰`}
           >
-            <span className="ill-none">비우기</span>
+            <img src={item.thumbnail} alt={item.name} />
+            <span className="ill-name">{item.name}</span>
           </button>
-          {saved.map((item) => (
-            <button
-              key={item.id}
-              className={"ill-cell" + (assigned === item.id ? " on" : "")}
-              onClick={() => setFaceArt(selFace, item.id)}
-              title={`${item.name} · ${item.view} 뷰`}
-            >
-              <img src={item.thumbnail} alt={item.name} />
-              <span className="ill-name">{item.name}</span>
-            </button>
-          ))}
+        ))}
+      </div>
+      {!saved.length && (
+        <div className="note" style={{ marginTop: 8 }}>
+          Step 7에서 일러스트를 추출·저장하거나, 위 ‘이미지 업로드’로 직접 추가하세요.
         </div>
       )}
+
+      {assigned &&
+        (() => {
+          const xf = faceXf[selFace] ?? {
+            scale: 1,
+            x: 0,
+            y: 0,
+            angle: 0,
+            flipX: false,
+            flipY: false,
+          };
+          const Row = (
+            label: string,
+            key: "scale" | "x" | "y" | "angle",
+            min: number,
+            max: number,
+            step: number,
+            unit: string
+          ) => {
+            const apply = (v: number) =>
+              setFaceXf(selFace, {
+                [key]: Math.max(min, Math.min(max, v)),
+              });
+            return (
+              <div className="field" key={key}>
+                <label>{label}</label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    type="range"
+                    style={{ flex: 1 }}
+                    min={min}
+                    max={max}
+                    step={step}
+                    value={xf[key]}
+                    onChange={(e) => apply(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    style={{ width: 64 }}
+                    min={min}
+                    max={max}
+                    step={step}
+                    value={Number(xf[key].toFixed(2))}
+                    onChange={(e) =>
+                      e.target.value !== "" && apply(Number(e.target.value))
+                    }
+                  />
+                  <span style={{ color: "var(--text-dim)", width: 14 }}>{unit}</span>
+                </div>
+              </div>
+            );
+          };
+          return (
+            <>
+              <div
+                className="list-head"
+                style={{
+                  margin: "16px 0 6px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <span>‘{selMeta.label}’ 이미지 조절</span>
+                <button
+                  className="btn secondary"
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                  onClick={() => setFaceXf(selFace, null)}
+                >
+                  초기화
+                </button>
+              </div>
+              {Row("크기", "scale", 0.1, 3, 0.01, "×")}
+              {Row("가로 이동", "x", -0.5, 0.5, 0.01, "")}
+              {Row("세로 이동", "y", -0.5, 0.5, 0.01, "")}
+              {Row("회전", "angle", -180, 180, 1, "°")}
+              <div className="seg-row" style={{ marginTop: 8, gap: 4 }}>
+                <button
+                  className={"seg-btn" + (xf.flipX ? " on" : "")}
+                  onClick={() => setFaceXf(selFace, { flipX: !xf.flipX })}
+                >
+                  좌우 반전
+                </button>
+                <button
+                  className={"seg-btn" + (xf.flipY ? " on" : "")}
+                  onClick={() => setFaceXf(selFace, { flipY: !xf.flipY })}
+                >
+                  상하 반전
+                </button>
+              </div>
+            </>
+          );
+        })()}
 
       <div className="list-head" style={{ margin: "16px 0 6px" }}>면별 적용 현황</div>
       <div className="face-summary">

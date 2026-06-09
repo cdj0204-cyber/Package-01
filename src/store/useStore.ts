@@ -5,6 +5,7 @@ import type {
   BoxForm,
   BoxSizing,
   DraftConfig,
+  FaceArtTransform,
   ImportedModel,
   InsertFoam,
   LidSide,
@@ -69,6 +70,7 @@ const initialProject: ProjectState = {
   lineArt: null,
   savedIllustrations: [],
   boxFaceArtwork: {},
+  boxFaceTransform: {},
   artwork: initialArtwork,
   textElements: [],
 };
@@ -117,6 +119,9 @@ export interface AppStore extends ProjectState {
   /** Transform gizmo mode for the selected model. */
   gizmoMode: "translate" | "rotate";
   setGizmoMode: (m: "translate" | "rotate") => void;
+  /** Step 8 — which box face the on-face artwork gizmo is shown on. */
+  boxSelectedFace: BoxFace | null;
+  setBoxSelectedFace: (f: BoxFace | null) => void;
   /** Camera viewpoint: free perspective or one of the 6 orthographic faces. */
   cameraView: CameraView;
   setCameraView: (v: CameraView) => void;
@@ -169,6 +174,11 @@ export interface AppStore extends ProjectState {
   renameSavedIllustration: (id: string, name: string) => void;
   /** Step 8 — assign a saved illustration to a box face (null clears it). */
   setBoxFaceArtwork: (face: BoxFace, illustrationId: string | null) => void;
+  /** Step 8 — adjust the on-face placement (scale/move/rotate). null resets it. */
+  setBoxFaceTransform: (
+    face: BoxFace,
+    patch: Partial<FaceArtTransform> | null
+  ) => void;
   updateBoxSizing: (patch: Partial<BoxSizing>) => void;
   updateArtwork: (patch: Partial<ArtworkConfig>) => void;
   addText: (el: TextElement) => void;
@@ -188,6 +198,8 @@ export const useStore = create<AppStore>((set) => ({
   setLightContrast: (lightContrast) => set({ lightContrast }),
   gizmoMode: "rotate",
   setGizmoMode: (gizmoMode) => set({ gizmoMode }),
+  boxSelectedFace: "front",
+  setBoxSelectedFace: (boxSelectedFace) => set({ boxSelectedFace }),
   cameraView: "perspective",
   setCameraView: (cameraView) => set({ cameraView }),
   step7View: "product",
@@ -381,6 +393,25 @@ export const useStore = create<AppStore>((set) => ({
       if (illustrationId) next[face] = illustrationId;
       else delete next[face];
       return { boxFaceArtwork: next };
+    }),
+
+  setBoxFaceTransform: (face, patch) =>
+    set((s) => {
+      const next = { ...s.boxFaceTransform };
+      if (patch === null) {
+        delete next[face];
+      } else {
+        const cur = next[face] ?? {
+          scale: 1,
+          x: 0,
+          y: 0,
+          angle: 0,
+          flipX: false,
+          flipY: false,
+        };
+        next[face] = { ...cur, ...patch };
+      }
+      return { boxFaceTransform: next };
     }),
 
   updateBoxSizing: (patch) =>
