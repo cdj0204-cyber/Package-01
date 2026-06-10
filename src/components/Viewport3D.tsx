@@ -163,7 +163,7 @@ function applyArtMatrix(
 
 /**
  * Build the on-face artwork gizmo for the face at placement `m` (size fw×fh):
- * 4 orange MOVE arrows, 4 cyan SCALE corners, 1 green ROTATE knob. Returns the
+ * 4 blue MOVE arrows, 4 white SCALE corners, 1 green ROTATE knob. Returns the
  * handle meshes plus a `relayout(t)` that repositions them for a transform — so
  * the gizmo follows the artwork live while dragging without a store round-trip.
  */
@@ -184,11 +184,11 @@ function buildArtGizmo(
   };
   const dirs: Array<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
   const arrows = dirs.map(() =>
-    mk(new THREE.ConeGeometry(hs * 0.95, hs * 2.6, 18), 0xf0883e, "move")
+    mk(new THREE.ConeGeometry(hs * 0.95, hs * 2.6, 18), 0x4dabf7, "move")
   );
   const corn: Array<[number, number]> = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
   const corners = corn.map(() =>
-    mk(new THREE.BoxGeometry(hs * 1.7, hs * 1.7, hs * 1.7), 0x4fc3f7, "scale")
+    mk(new THREE.BoxGeometry(hs * 1.7, hs * 1.7, hs * 1.7), 0xeceff4, "scale")
   );
   const rotate = mk(new THREE.SphereGeometry(hs * 1.1, 18, 12), 0x66bb6a, "rotate");
   const handles = [...arrows, ...corners, rotate];
@@ -1278,7 +1278,7 @@ export function Viewport3D() {
         // Offset outline as world-space line loops at the base plane (outer
         // profile only — internal holes are ignored for the insert-foam solid).
         const loops = outerLoopsOnly(contourAt(sil.field, sil.offset));
-        const lineColor = selected ? 0xf0883e : 0x6fa8ff;
+        const lineColor = selected ? 0x4dabf7 : 0x55708e;
         for (const loop of loops) {
           if (loop.length < 2) continue;
           const pts = loop.map((p) => {

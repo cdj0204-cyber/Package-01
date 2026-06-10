@@ -59,7 +59,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
         return;
       }
       const { fit } = makeFit(sil.bbox.min, sil.bbox.max, w, h, 60);
-      c.strokeStyle = "#f0883e";
+      c.strokeStyle = "#4dabf7";
       c.lineWidth = 2;
       for (const loop of sil.loops) {
         c.beginPath();
@@ -237,7 +237,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
           c.strokeStyle = "#e6edf3";
           c.setLineDash([]);
         } else {
-          c.strokeStyle = "#f0883e";
+          c.strokeStyle = "#4dabf7";
           c.setLineDash([5, 4]);
         }
         c.lineWidth = 1.2;
@@ -248,7 +248,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
       c.font = "12px system-ui";
       c.textAlign = "left";
       c.fillText(
-        `${PDF_DIELINE_NAME} · 시트 ${d.sheet.width.toFixed(0)} × ${d.sheet.height.toFixed(0)} mm  (흰색=칼선, 주황 점선=오시)`,
+        `${PDF_DIELINE_NAME} · 시트 ${d.sheet.width.toFixed(0)} × ${d.sheet.height.toFixed(0)} mm  (흰색=칼선, 파랑 점선=오시)`,
         12,
         h - 14
       );

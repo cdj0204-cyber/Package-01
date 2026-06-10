@@ -128,7 +128,7 @@ const POS_OPTS: AlignOpt[] = [
 // Small diagram showing where models snap to (guide line = accent, rects = models).
 function AlignIcon({ kind }: { kind: AlignIconKind }) {
   const rectFill = "#7d93ab";
-  const guide = "#f0883e";
+  const guide = "#4dabf7";
   let rects: Array<[number, number, number, number]> = [];
   let line: [number, number, number, number] = [0, 0, 0, 0];
   switch (kind) {

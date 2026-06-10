@@ -42,8 +42,8 @@ export function App() {
   return (
     <div className={"app" + (splitStep ? " app-split" : "")}>
       <div className="topbar">
-        <h1>Package 01</h1>
-        <span className="badge">스켈레톤</span>
+        <h1>ORBOTIX INDUSTRIES</h1>
+        <span className="badge">PACKAGE 01</span>
         <span className="spacer" />
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
           {models.length === 0
