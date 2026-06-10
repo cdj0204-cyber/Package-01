@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store/useStore";
 import type { ViewportKind } from "../pipeline/steps";
-import { getArtworkPreset, getBoxPreset } from "../box/presets";
-import { generateDieline } from "../box/dieline";
-import type { LineArtLayerKind, Silhouette } from "../types";
+import { getArtworkPreset } from "../box/presets";
+import { pdfDieline, PDF_DIELINE_NAME } from "../box/pdfDieline";
+import { PDF_FACE_PANELS } from "../box/pdfDielineFaces";
+import type { BoxFace, BoxText, FaceArtTransform, LineArtLayerKind, Silhouette } from "../types";
 import { getRelitShaded } from "./relightShaded";
+import { composeIllustration } from "./illustrationRender";
 
 // Back-to-front draw order for the Step-7 illustration layers.
 const LAYER_Z: Record<LineArtLayerKind, number> = {
@@ -30,8 +32,11 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
   const artwork = useStore((s) => s.artwork);
   const texts = useStore((s) => s.textElements);
   const updateText = useStore((s) => s.updateText);
-  const boxPresetId = useStore((s) => s.boxPresetId);
   const boxSizing = useStore((s) => s.boxSizing);
+  const boxFaceArtwork = useStore((s) => s.boxFaceArtwork);
+  const boxFaceTransform = useStore((s) => s.boxFaceTransform);
+  const boxTexts = useStore((s) => s.boxTexts);
+  const savedIllustrations = useStore((s) => s.savedIllustrations);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -170,16 +175,57 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
     }
 
     function drawDieline(c: CanvasRenderingContext2D, w: number, h: number) {
-      const preset = getBoxPreset(boxPresetId);
-      if (!preset) {
-        c.fillStyle = "#8b949e";
-        c.font = "13px system-ui";
-        c.textAlign = "center";
-        c.fillText("박스 유형을 먼저 선택하세요 (Step 6).", w / 2, h / 2);
-        return;
+      // Preset dieline traced 1:1 from the reference PDF (proof-of-concept: the
+      // sized preset stands in for the parametric generator on this step).
+      const d = pdfDieline;
+      const { fit, scale } = makeFit([0, 0], [d.sheet.width, d.sheet.height], w, h, 60);
+
+      // ── Step-8 renderings (illustration + text per face) on their panels ──────
+      // Each face's content is drawn in the SAME face-local frame Step 8 uses
+      // (+x right, +y up, mm), rotated onto its dieline panel per fold direction.
+      for (const faceKey of Object.keys(PDF_FACE_PANELS) as BoxFace[]) {
+        const panel = PDF_FACE_PANELS[faceKey]!;
+        const illId = boxFaceArtwork[faceKey];
+        const saved = illId ? savedIllustrations.find((s) => s.id === illId) : undefined;
+        const texts = boxTexts.filter((t) => t.face === faceKey && t.text.trim());
+        if (!saved && texts.length === 0) continue;
+
+        const { fw, fh, rotDeg } = panel;
+        const [pcx, pcy] = fit(panel.cx, panel.cy);
+        const upright = rotDeg % 180 === 0; // panel rect on the sheet (axis-aligned)
+        const sw = (upright ? fw : fh) * scale;
+        const sh = (upright ? fh : fw) * scale;
+
+        c.save();
+        // Clip to the panel so oversized/moved artwork stays inside its face.
+        c.beginPath();
+        c.rect(pcx - sw / 2, pcy - sh / 2, sw, sh);
+        c.clip();
+        // Face frame: origin at panel centre; sheet-CCW rotation is canvas-CW.
+        c.translate(pcx, pcy);
+        c.rotate((-rotDeg * Math.PI) / 180);
+        // Below here: face-local mm × `scale` = px, +x right, +y UP (flip y).
+
+        if (saved) {
+          const t: FaceArtTransform | undefined = boxFaceTransform[faceKey];
+          const TEXW = 512;
+          const TEXH = Math.max(1, Math.round((TEXW * fh) / fw));
+          const img = composeIllustration(saved.lineArt, saved.background, TEXW, TEXH, () =>
+            setImgVersion((v) => v + 1)
+          );
+          const s = Math.max(0.05, t?.scale ?? 1);
+          c.save();
+          c.translate((t?.x ?? 0) * fw * scale, -(t?.y ?? 0) * fh * scale);
+          c.rotate((-(t?.angle ?? 0) * Math.PI) / 180);
+          c.scale(s * (t?.flipX ? -1 : 1), s * (t?.flipY ? -1 : 1));
+          c.drawImage(img, (-fw * scale) / 2, (-fh * scale) / 2, fw * scale, fh * scale);
+          c.restore();
+        }
+
+        for (const t of texts) drawFaceText(c, t, fw, fh, scale);
+        c.restore();
       }
-      const d = generateDieline(preset.dielineKind, boxSizing);
-      const { fit } = makeFit([0, 0], [d.sheet.width, d.sheet.height], w, h, 60);
+
       for (const line of d.lines) {
         c.beginPath();
         line.pts.forEach((p, i) => {
@@ -191,7 +237,7 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
           c.strokeStyle = "#e6edf3";
           c.setLineDash([]);
         } else {
-          c.strokeStyle = "#e23b3b";
+          c.strokeStyle = "#f0883e";
           c.setLineDash([5, 4]);
         }
         c.lineWidth = 1.2;
@@ -202,12 +248,12 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
       c.font = "12px system-ui";
       c.textAlign = "left";
       c.fillText(
-        `${preset.name} · 시트 ${d.sheet.width.toFixed(0)} × ${d.sheet.height.toFixed(0)} mm  (흰색=재단, 빨강=접지)`,
+        `${PDF_DIELINE_NAME} · 시트 ${d.sheet.width.toFixed(0)} × ${d.sheet.height.toFixed(0)} mm  (흰색=칼선, 주황 점선=오시)`,
         12,
         h - 14
       );
     }
-  }, [kind, silhouettes, lineArt, artwork, texts, boxPresetId, boxSizing, imgVersion]);
+  }, [kind, silhouettes, lineArt, artwork, texts, boxSizing, boxFaceArtwork, boxFaceTransform, boxTexts, savedIllustrations, imgVersion]);
 
   // ── interactive text drag (artwork step) ────────────────────────────────────
   function onPointerDown(e: React.PointerEvent) {
@@ -267,6 +313,43 @@ export function Viewport2D({ kind }: { kind: ViewportKind }) {
       onPointerLeave={onPointerUp}
     />
   );
+}
+
+/**
+ * Draw a Step-8 face text into the current face-local canvas frame (origin at
+ * the face centre, +x right, +y up, `scale` px per mm). Mirrors the 3D
+ * buildTextMesh maths exactly — sizing, corner anchors, rotation and flips — so
+ * the dieline print matches the box render.
+ */
+function drawFaceText(
+  c: CanvasRenderingContext2D,
+  t: BoxText,
+  fw: number,
+  fh: number,
+  scale: number
+) {
+  const fontPx = Math.max(1, t.sizeMm * scale);
+  const fontStr = `${t.weight || 400} ${fontPx}px ${t.font}`;
+  c.save();
+  c.font = fontStr;
+  const planeW = c.measureText(t.text).width + fontPx * 0.6;
+  const planeH = fontPx * 1.35;
+  // Anchor: shift the (centred) text so the chosen corner sits at (x, y).
+  let fx = t.x * fw * scale;
+  let fy = t.y * fh * scale;
+  const a = t.anchor ?? "center";
+  if (a === "tl" || a === "bl") fx += planeW / 2;
+  if (a === "tr" || a === "br") fx -= planeW / 2;
+  if (a === "tl" || a === "tr") fy -= planeH / 2;
+  if (a === "bl" || a === "br") fy += planeH / 2;
+  c.translate(fx, -fy); // face y-up → canvas y-down
+  c.rotate((-t.angle * Math.PI) / 180);
+  c.scale(t.flipX ? -1 : 1, t.flipY ? -1 : 1);
+  c.fillStyle = t.color;
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillText(t.text, 0, 0);
+  c.restore();
 }
 
 /** Builds a fitter mapping model coords → canvas coords (y-up → y-down). */

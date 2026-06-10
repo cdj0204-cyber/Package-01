@@ -501,9 +501,10 @@ export function Viewport3D() {
   // the fit from the moment you pick a box type.
   const showAssembly = step >= 5 && step <= 8 && step !== 7;
   // Step 3 also shows the imported product (as a faint ghost) so you can gauge how
-  // large the foam must be to contain it.
+  // large the foam must be to contain it; Step 4 keeps the ghost so you can check
+  // the cut cavity against the product it was cut for.
   const showModel =
-    step <= 3 || (step === 7 && step7View === "product") || showAssembly;
+    step <= 4 || (step === 7 && step7View === "product") || showAssembly;
   const boxVisible = showAssembly || (step === 7 && step7View === "box");
 
   // ── one-time scene setup ────────────────────────────────────────────────────
@@ -1228,9 +1229,9 @@ export function Viewport3D() {
       tc.detach();
     }
 
-    // In Step 3 the product is a faint reference ghost under the box form; keep
-    // it solid everywhere else.
-    const ghost = step === 3;
+    // In Step 3 the product is a faint reference ghost under the box form, and in
+    // Step 4 it stays ghosted inside the cut foam so the cavity fit is visible.
+    const ghost = step === 3 || step === 4;
     for (const [id, g] of map.entries()) {
       const on = id === selectedModelId && showModel && !ghost;
       for (const mat of g.mats) {
