@@ -489,6 +489,7 @@ export function Viewport3D() {
     };
   }, []);
   const boxClosed = useStore((s) => s.boxClosed);
+  const boxColor = useStore((s) => s.boxColor);
   const lightContrast = useStore((s) => s.lightContrast);
   const gizmoMode = useStore((s) => s.gizmoMode);
   const cameraView = useStore((s) => s.cameraView);
@@ -843,7 +844,11 @@ export function Viewport3D() {
         orbit.enabled = true;
         const pivot = boxPivotRef.current!;
         const { w, h, d } = boxDimsRef.current;
-        useStore.getState().updateBoxForm({ width: w, height: h, depth: d });
+        useStore.getState().updateBoxForm({
+          width: Math.round(w),
+          height: Math.round(h),
+          depth: Math.round(d),
+        });
         useStore.getState().setBoxTransform({
           position: [pivot.position.x, pivot.position.y, pivot.position.z],
           rotation: [pivot.rotation.x, pivot.rotation.y, pivot.rotation.z],
@@ -1408,7 +1413,13 @@ export function Viewport3D() {
       const groupWorld = new THREE.Matrix4().makeTranslation(bx, baseY, bz);
 
       const t = 3; // board thickness 3 mm (side walls doubled to 6 mm below)
-      const face: [number, number, number] = model.color;
+      // Box board colour: the user-chosen hex (Step 8), falling back to kraft.
+      const face: [number, number, number] = (() => {
+        const m = /^#?([0-9a-f]{6})$/i.exec(boxColor || "");
+        if (!m) return model.color;
+        const n = parseInt(m[1], 16);
+        return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+      })();
       const edge: [number, number, number] = [
         face[0] * 0.55,
         face[1] * 0.5,
@@ -1619,7 +1630,7 @@ export function Viewport3D() {
             if (boxGroup) content.add(boxGroup);
           }
         : null;
-  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork, boxFaceTransform, boxTexts, boxSelectedFace, fontsReady]);
+  }, [step, models, insertFoam, boxPresetId, boxSizing, boxLidSide, boxVisible, savedIllustrations, boxFaceArtwork, boxFaceTransform, boxTexts, boxSelectedFace, fontsReady, boxColor]);
 
   // ── Step 8: animate the G-type lid open ⇄ closed when the toggle flips ─────────
   useEffect(() => {

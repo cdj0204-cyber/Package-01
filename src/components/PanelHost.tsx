@@ -769,20 +769,76 @@ function Step4Boolean() {
     };
   }
 
-  // Align the box-form centre to the selected solid (XZ centre + sit on its base).
-  function alignToSelected() {
+  // Combined AABB of all carried-over solids (the product volume being packed).
+  function combinedSolidAABB() {
+    const mn: [number, number, number] = [Infinity, Infinity, Infinity];
+    const mx: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    let any = false;
+    for (const { sil } of solids) {
+      const b = extrudeAABB(sil!);
+      if (!b) continue;
+      any = true;
+      for (let k = 0; k < 3; k++) {
+        mn[k] = Math.min(mn[k], b.min[k]);
+        mx[k] = Math.max(mx[k], b.max[k]);
+      }
+    }
+    return any ? { min: mn, max: mx } : null;
+  }
+  function selectedSolidAABB() {
     const target = solids.find((x) => x.pm.id === selectedModelId) ?? solids[0];
-    if (!target) return;
-    const box = extrudeAABB(target.sil!);
-    if (!box) return;
+    return target ? extrudeAABB(target.sil!) : null;
+  }
+
+  // Default box form: the product bounding box with the TOP face flush to the
+  // product and +10 mm clearance on the other five faces. Resizes + repositions.
+  function fitToProduct() {
+    const b = combinedSolidAABB();
+    if (!b) return;
+    const sw = b.max[0] - b.min[0];
+    const sh = b.max[1] - b.min[1];
+    const sd = b.max[2] - b.min[2];
+    const height = Math.round(sh + 10);
+    updateBoxForm({ width: Math.round(sw + 20), depth: Math.round(sd + 20), height });
+    setBoxTransform({
+      position: [(b.min[0] + b.max[0]) / 2, b.max[1] - height / 2, (b.min[2] + b.max[2]) / 2],
+      rotation: [0, 0, 0],
+    });
+  }
+
+  // Auto-fit once when first arriving with no explicit box pose yet.
+  const didFit = useRef(false);
+  useEffect(() => {
+    if (didFit.current) return;
+    if (boxTransform === null && solids.length) {
+      fitToProduct();
+      didFit.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [solids.length, boxTransform]);
+
+  // Align the box-form to the selected solid. Full = XZ centre + top flush.
+  function alignToSelected() {
+    const b = selectedSolidAABB();
+    if (!b) return;
     setBoxTransform({
       position: [
-        (box.min[0] + box.max[0]) / 2,
-        box.min[1] + boxForm.height / 2,
-        (box.min[2] + box.max[2]) / 2,
+        (b.min[0] + b.max[0]) / 2,
+        b.max[1] - boxForm.height / 2,
+        (b.min[2] + b.max[2]) / 2,
       ],
       rotation: [0, 0, 0],
     });
+  }
+  // Align a single axis: X/Z centre on the solid, Y so the box top is flush.
+  function alignAxis(axis: 0 | 1 | 2, mode: "center" | "top") {
+    const b = selectedSolidAABB();
+    if (!b) return;
+    const cur = boxTransform ?? autoPose();
+    if (!cur) return;
+    const pos = [...cur.position] as [number, number, number];
+    pos[axis] = mode === "top" ? b.max[axis] - boxForm.height / 2 : (b.min[axis] + b.max[axis]) / 2;
+    setBoxTransform({ position: pos, rotation: cur.rotation });
   }
 
   function run() {
@@ -812,8 +868,9 @@ function Step4Boolean() {
       <label>{label}</label>
       <input
         type="number"
-        value={boxForm[k]}
-        onChange={(e) => updateBoxForm({ [k]: Number(e.target.value) } as any)}
+        step={1}
+        value={Math.round(boxForm[k])}
+        onChange={(e) => updateBoxForm({ [k]: Math.round(Number(e.target.value)) } as any)}
       />
     </div>
   );
@@ -876,11 +933,32 @@ function Step4Boolean() {
       <button
         className="btn block secondary"
         style={{ marginTop: 8 }}
+        onClick={fitToProduct}
+        title="제품 볼륨에 맞춰 박스 폼을 다시 만듭니다 (윗면 맞춤 + 5면 +10mm)"
+      >
+        ⤢ 제품 크기에 맞춰 초기화 (+10mm)
+      </button>
+
+      <div className="list-head" style={{ margin: "10px 0 6px" }}>선택 솔리드에 정렬</div>
+      <div className="seg-row" style={{ gap: 4 }}>
+        <button className="seg-btn" disabled={!selectedModelId} onClick={() => alignAxis(0, "center")} title="X축 중앙 정렬">
+          X 중앙
+        </button>
+        <button className="seg-btn" disabled={!selectedModelId} onClick={() => alignAxis(1, "top")} title="Y축 윗면(높이) 맞춤">
+          Y 윗면
+        </button>
+        <button className="seg-btn" disabled={!selectedModelId} onClick={() => alignAxis(2, "center")} title="Z축 중앙 정렬">
+          Z 중앙
+        </button>
+      </div>
+      <button
+        className="btn block secondary"
+        style={{ marginTop: 6 }}
         disabled={!selectedModelId}
         onClick={alignToSelected}
-        title="선택한 솔리드에 박스 폼 위치를 맞춥니다 (XZ 중심 + 바닥 높이)"
+        title="XZ 중앙 + 윗면 맞춤으로 한 번에 정렬"
       >
-        ⟱ 선택 솔리드에 박스 폼 정렬
+        ⟱ 전체 정렬 (XZ 중앙 · 윗면 맞춤)
       </button>
 
       <div className="note" style={{ marginTop: 6 }}>
@@ -1125,6 +1203,8 @@ function Step8Render() {
   const setSelectedFace = useStore((s) => s.setBoxSelectedFace);
   const boxClosed = useStore((s) => s.boxClosed);
   const setBoxClosed = useStore((s) => s.setBoxClosed);
+  const boxColor = useStore((s) => s.boxColor);
+  const setBoxColor = useStore((s) => s.setBoxColor);
   const [selFace, setSelFace] = useState<BoxFace>("front");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -1400,9 +1480,45 @@ function Step8Render() {
           remove={removeBoxText}
         />
       </Collapsible>
+
+      <Collapsible title="박스 컬러 · 보드 색상">
+        <div className="note" style={{ marginBottom: 8 }}>
+          박스 보드(골판지) 자체의 색을 조절합니다. 면 가장자리(골)는 자동으로 더
+          진하게 표현됩니다.
+        </div>
+        <div className="seg-row" style={{ flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+          {BOX_COLOR_PRESETS.map((c) => (
+            <button
+              key={c.hex}
+              className={"seg-btn" + (boxColor.toLowerCase() === c.hex ? " on" : "")}
+              onClick={() => setBoxColor(c.hex)}
+              title={c.name}
+            >
+              <span
+                style={{
+                  display: "inline-block", width: 10, height: 10, borderRadius: 2,
+                  background: c.hex, border: "1px solid #2a313c", marginRight: 5,
+                  verticalAlign: "middle",
+                }}
+              />
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <ColorPicker value={boxColor} onChange={setBoxColor} />
+      </Collapsible>
     </div>
   );
 }
+
+// Quick box-board colour swatches (hex lowercase for selection matching).
+const BOX_COLOR_PRESETS: Array<{ name: string; hex: string }> = [
+  { name: "크라프트", hex: "#cc9e66" },
+  { name: "화이트", hex: "#f2efe9" },
+  { name: "브라운", hex: "#8a5a36" },
+  { name: "그레이", hex: "#9a9a9a" },
+  { name: "블랙", hex: "#2a2a2e" },
+];
 
 // ── Step 8 — per-face text labels editor (text / font / size / colour + place) ──
 const WEIGHT_LABELS: Record<number, string> = {

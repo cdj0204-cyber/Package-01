@@ -133,6 +133,9 @@ export interface AppStore extends ProjectState {
   /** Step 8: show the box with its lid open (default) or closed. */
   boxClosed: boolean;
   setBoxClosed: (v: boolean) => void;
+  /** Step 8 — the box board (cardboard) colour, as a hex string. */
+  boxColor: string;
+  setBoxColor: (c: string) => void;
 
   // ── Multi-model management ───────────────────────────────────────────────────
   /** Import one or more products; the last one becomes selected. */
@@ -212,6 +215,8 @@ export const useStore = create<AppStore>((set) => ({
   setStep7View: (step7View) => set({ step7View }),
   boxClosed: false,
   setBoxClosed: (boxClosed) => set({ boxClosed }),
+  boxColor: "#cc9e66", // kraft board default
+  setBoxColor: (boxColor) => set({ boxColor }),
   boxTransform: null,
   setBoxTransform: (boxTransform) => set({ boxTransform }),
   boxEditMode: "resize",
